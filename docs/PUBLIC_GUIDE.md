@@ -159,19 +159,27 @@ permissions; a verbal split or a child added after the work is complete is not
 delegation.
 
 A complete feature or UI diagnosis stays with one child through implementation,
-local tests, and ordinary failure repair. Return a normal failure to that child.
-Escalate to the root only for a public-interface change or major design
-decision, a failure that remains unresolved after reasonable repair, or a
-capability or permission limit. The root independently checks cross-module
-integration and high-risk permission, data, or process behavior before final
-acceptance.
+relevant verification scripts, build, test, package checks, and ordinary failure
+repair. Entering validation does not transfer execution to the root; return a
+normal failure to the package owner. Escalate only for a public-interface change
+or major design decision, a failure that remains unresolved after reasonable
+repair, or a capability or permission limit. The root defines acceptance
+criteria and risk boundaries, reviews real diffs, key evidence, and boundaries
+at stage handoffs, and makes the acceptance decision. This does not require the
+root to run every validation command or script. When independent execution
+review is needed, the root may assign a bounded Luna review package with no
+write overlap, while retaining the decision; an extra reviewer is not required
+by default. The root independently checks high-risk permission, real-data, and
+process-cleanup behavior within existing authorization boundaries, confirms
+required authorization is already in place, and does not infer or expand it. A
+child's report or exit code is not a substitute for that check.
 
 Long tests, polling, sampling, and ordinary failure handling remain in that
-same Luna package. Use a script or native wait for ongoing monitoring. The root
-normally reviews the handoff summary, relevant diff, and specific artifacts;
-it does not repeat the same full exploration or tests. Expand checks only for
-completion, a clear exception or threshold, a pending decision, or a risk
-signal.
+same Luna package. Use a script or native wait for ongoing monitoring. Review
+stage deliveries together: the root reads the handoff summary, relevant diff,
+and specific artifacts without taking over execution or repeating the same full
+exploration or tests. Expand checks only for a clear evidence conflict, missing
+key coverage, a pending decision, or a risk signal.
 
 Direct completion is appropriate for a simple question, a genuinely one-off
 small change, a root-only decision, a tightly coupled dependency chain with no
@@ -185,10 +193,10 @@ are not started merely to satisfy a ratio or create duplicate work.
 | Example | Expected route |
 | --- | --- |
 | Simple question, one small edit, or a root-only decision | Complete directly |
-| Complete feature or UI diagnosis with clear ownership and acceptance | Delegate implementation, local tests, and ordinary repairs to one child |
+| Complete feature or UI diagnosis with clear ownership and acceptance | Delegate implementation, relevant verification scripts, build/test/package checks, and ordinary repairs to one child |
 | Independent work packages with separate resources | Delegate; parallelize when safe |
 | Dependent packages or shared GUI, port, or build directory | Delegate; use serial order with one resource owner |
-| Cross-module integration or high-risk permission, data, or process behavior | Child performs the package; root performs the independent risk check |
+| Cross-module integration or high-risk permission, real-data, or process behavior | Child performs the package; root owns the acceptance judgment and independently checks high-risk behavior within existing authorization boundaries; a separate bounded reviewer is optional |
 | Public-interface change, major design decision, repeated unresolved failure, or capability/permission block | Escalate to the root |
 | The user explicitly asks for no delegation | Complete directly |
 

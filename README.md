@@ -194,19 +194,28 @@ the host's permissions; the root does not merely describe a split or add a
 child after the work is complete.
 
 A full feature or UI diagnosis is one work package: the same child carries it
-through implementation, local tests, and ordinary failure repair. A normal
-failure returns to that child for repair. Escalate to Astra when the repair
-requires a public-interface change or major design decision, the failure stays
-unresolved after reasonable repair, or a capability or permission limit blocks
-the package. Astra independently checks cross-module integration and
-high-risk permission, data, or process behavior before final acceptance.
+through implementation, relevant verification scripts, build, test, package
+checks, and ordinary failure repair. Entering validation does not transfer
+execution to Astra; a normal failure returns to the package owner. Escalate
+when a repair requires a public-interface change or major design decision, a
+failure stays unresolved after reasonable repair, or a capability or permission
+limit blocks the package. Astra defines acceptance criteria and risk boundaries,
+reviews real diffs, key evidence, and boundaries at stage handoffs, and makes
+the acceptance decision. This does not require Astra to run every validation
+command or script. When independent execution review is needed, Astra may assign
+a bounded Luna review package with no write overlap, while retaining the
+decision; an extra reviewer is not required by default. Astra independently
+checks high-risk permission, real-data, and process-cleanup behavior within
+existing authorization boundaries, confirms required authorization is already
+in place, and does not infer or expand it. A child's report or exit code is not
+a substitute for that check.
 
 Long tests, polling, sampling, and ordinary failure handling stay in that same
-Luna package. Scripts or native waits perform ongoing monitoring. Astra's
-normal review reads the handoff summary, relevant diff, and specific artifacts
-without repeating the same full exploration or tests; it expands checks only
-for completion, a clear exception or threshold, a pending decision, or a risk
-signal.
+Luna package. Scripts or native waits perform ongoing monitoring. Review stage
+deliveries together: Astra reads the handoff summary, relevant diff, and
+specific artifacts without taking over execution or repeating the same full
+exploration or tests. Expand checks only for a clear evidence conflict, missing
+key coverage, a pending decision, or a risk signal.
 
 Direct completion is suitable for a simple question, a genuinely one-off small
 change, a root-only decision, a tightly coupled dependency chain with no safe
@@ -226,10 +235,10 @@ should state the reason.
 | Situation | Route |
 | --- | --- |
 | Simple question, one small edit, or root-only decision | Complete directly |
-| Complete feature or UI diagnosis with clear ownership and acceptance | Delegate the full implementation, local tests, and ordinary repairs to one child |
+| Complete feature or UI diagnosis with clear ownership and acceptance | Delegate implementation, relevant verification scripts, build/test/package checks, and ordinary repairs to one child |
 | Independent work packages with separate resources | Delegate; run in parallel when safe |
 | Dependent packages or shared GUI, port, or build directory | Delegate; use serial order with one resource owner |
-| Cross-module integration or high-risk permission, data, or process behavior | Child performs the package; root performs the independent integration/risk check |
+| Cross-module integration or high-risk permission, real-data, or process behavior | Child performs the package; root owns the acceptance judgment and independently checks high-risk behavior within existing authorization boundaries; a separate bounded reviewer is optional |
 | Public-interface change, major design decision, repeated unresolved failure, or capability/permission block | Escalate to the root |
 | The user explicitly says not to delegate | Complete directly |
 

@@ -6,6 +6,11 @@
   Luna work package; use script or native-wait monitoring and review compact
   summaries, relevant diffs, and targeted artifacts. Document summary-mode
   process output with private logs, while preserving root risk and final checks.
+- Clarify verification ownership: the package owner handles relevant scripts,
+  builds, tests, package checks, and ordinary repair; the root sets criteria,
+  reviews stage evidence, and decides acceptance without automatically taking
+  over validation execution. Independent review is optional and bounded; this
+  rule change does not claim measured token savings or add forced scheduling.
 - Use `gpt-6-luna` for the default child model and all five native roles.
 - Default to `xhigh` when usable scores for this exact model are unavailable;
   invalidate old-model policy and capability caches. Model capability checks
