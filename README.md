@@ -229,8 +229,9 @@ started merely to satisfy a ratio or create duplicate work.
 
 If the user specifies a worker count or parallel arrangement that cannot be met
 safely, explain the constraint and ask to adjust it; do not silently change the
-request. The root may take work back when an escalation condition applies and
-should state the reason.
+request. When recovery rules justify a root takeover, limit it to one pre-scoped
+small package within current authorization and state its close point; broader
+Astra execution requires the user's decision.
 
 | Situation | Route |
 | --- | --- |
@@ -239,19 +240,57 @@ should state the reason.
 | Independent work packages with separate resources | Delegate; run in parallel when safe |
 | Dependent packages or shared GUI, port, or build directory | Delegate; use serial order with one resource owner |
 | Cross-module integration or high-risk permission, real-data, or process behavior | Child performs the package; root owns the acceptance judgment and independently checks high-risk behavior within existing authorization boundaries; a separate bounded reviewer is optional |
-| Public-interface change, major design decision, repeated unresolved failure, or capability/permission block | Escalate to the root |
+| Public-interface change, major design decision, or a block that remains after bounded recovery or needs new authorization | Escalate to the root; continue independent work |
 | The user explicitly says not to delegate | Complete directly |
 
-Reassess unfinished work when the scope expands, the original plan no longer
-fits, troubleshooting repeats, or the task enters a new implementation or
-verification phase. The root may take work back when an escalation condition
-applies, and should state the reason. The daily selector only chooses a
-supported role level; it does not decide whether to delegate or spawn agents,
-and it is not a timer or scheduler. If the selector, role, or native tool
-fails, report the actual returned error. Do not claim that a capability is
-unavailable without evidence, and do not treat successful selection as a
-child-agent invocation. These are instructions for the agent, not a
-host-enforced guarantee of delegation.
+Reassess unfinished work when scope expands, the original plan no longer fits,
+troubleshooting repeats, or a new implementation or verification phase begins.
+For each actual selector, role, or native-dispatch failure, add one concise line
+to the existing task status entry with the safe original error, category,
+affected package, time, any `retry-after`/quota reset or checkable recovery
+condition, cumulative attempts, whether that recovery event is consumed, current
+owner, and handoff point. An old failure
+is not evidence about a new batch; the count for the same unresolved failure
+does persist across turns and packages. If a response may mean the child already
+started, check for that active owner before retrying. A successful selection is
+not a dispatch or recovery result, and these instructions cannot force host
+scheduling.
+
+Classify the failure before acting. Distinguish quota, concurrency,
+parameter/role, permission, temporary network/service, and host-capability
+errors; mark an uncertain category `unknown`, never as Luna quota by default.
+Explicit host non-support is a capability limit, not a transient failure; retry
+only after host support demonstrably changes. When concurrency is full, reuse
+a suitable Luna who has stopped writing, or wait natively for existing work to finish;
+never interrupt another child to free a slot. A failed new child request does
+not show that an existing child cannot continue, and without a close operation
+do not claim a slot was released. For temporary rate, network, or service
+errors, honor an explicit `retry-after`; when none is given, wait 30 seconds,
+2 minutes, then 5 minutes. In either case, allow at most three extra attempts
+for the same fault; an explicit delay changes timing, not the limit. Use native
+waits, not frequent probes. Once those attempts are used, do not start another
+backoff sequence. Allow one real retry only for a new, unconsumed recovery event
+or checkable condition change, and mark it consumed. If it fails, the same past
+reset time or status change cannot trigger another retry in a later turn; retain
+the cumulative record and wait for a new recovery event.
+
+For an explicit quota exhaustion, wait for a stated reset and check once after
+it; do not probe before it, and mark that reset event consumed. If no reset is
+given, do not guess a time or retry blindly: resume only after a new checkable
+state change or user action. The same past reset time or consumed state change
+cannot trigger another attempt. A reset time does not prove recovery. For
+authentication, permission, parameter, or role
+errors, diagnose and actually correct the cause before a bounded retry; do not
+change account or permission settings without authorization. The root may take
+one small, pre-scoped package within current authorization while Luna recovery
+is unresolved, and must stop at its stated close point. Do not keep renaming
+dependent packages as temporary takeovers: without new recovery evidence, leave
+later Luna-dependent work pending with its recovery condition, and ask the user
+before expanding Astra execution. Independent work may continue. Once a real
+native dispatch recovery is evidenced, hand the remaining package back at a
+safe boundary; the root stops writing to that scope and records its evidence,
+remaining work, and new owner. Ordinary package test failures stay with the
+original owner.
 
 The final reply includes a compact execution summary, for example:
 
@@ -341,8 +380,11 @@ Use the matching repair path:
   the Codex home you intend to use. The required Astra Max and all five Luna
   levels must be present before `install --yes` can write anything. An empty
   isolated home cannot be used as a substitute for a working account.
-- **The policy is stale or blocked:** refresh the public snapshot and inspect
-  the selected role:
+- **The local policy or capability snapshot is explicitly stale/blocked:**
+  inspect the diagnostic, refresh once, then check `doctor` and the selected
+  role. If refresh fails again, keep its actual error and stop repeated refresh
+  attempts; this local check does not establish Luna quota or native-dispatch
+  recovery:
 
   ```sh
   python3 codex-adaptive-agents.py refresh --project /path/to/project
@@ -368,9 +410,10 @@ python3 codex-adaptive-agents.py select --project /path/to/project --explain
 cache lives in `.codex-adaptive-agents/state`; add `.codex-adaptive-agents/` to
 the project's ignore file. `select` may refresh once per local day. `refresh`
 explicitly updates the public capability snapshot and policy inputs. Use
-`refresh --project /path/to/project` to retry that project immediately after a
-same-day failure; plain `refresh` updates the home-level policy. Neither
-command invokes a model.
+`refresh --project /path/to/project` updates that project's policy inputs after
+a same-day selection failure; plain `refresh` updates the home-level policy.
+These commands refresh local/public policy data only: they do not retry a native
+child dispatch or establish quota recovery. Neither command invokes a model.
 
 ![Captured CLI checks](docs/images/cli-check.svg)
 

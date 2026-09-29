@@ -2,6 +2,11 @@
 
 ## 0.7.0 — Unreleased
 
+- Replace the generic failure-to-root fallback with classified native-dispatch
+  recovery: cap temporary retries even with `retry-after`, preserve the budget
+  across turns, consume each recovery event once, limit root takeovers to one
+  pre-scoped package, and return work to Luna only after current native-dispatch
+  recovery is evidenced.
 - Keep long tests, polling, sampling, and ordinary failure repair inside one
   Luna work package; use script or native-wait monitoring and review compact
   summaries, relevant diffs, and targeted artifacts. Document summary-mode
