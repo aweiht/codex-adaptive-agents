@@ -598,56 +598,150 @@ def _safe_status(value: Any) -> dict[str, str | None]:
 
 
 def _safe_effective(value: Mapping[str, Any] | None) -> dict[str, Any]:
-    if not isinstance(value, Mapping):
-        return {}
-    result: dict[str, Any] = {}
-    for key in ("model", "modelProvider", "provider", "reasoningEffort", "reasoning_effort"):
-        item = value.get(key)
-        if isinstance(item, (str, int, float, bool)) or item is None and key in value:
-            result[key] = item
+    result, _errors = _normalize_effective(value, "public effective metadata")
     return result
 
 
-def _spawn_metadata(thread: Mapping[str, Any]) -> dict[str, Any] | None:
-    spawn: Mapping[str, Any] | None = _map(thread.get("spawn"))
-    if spawn is None:
-        source = _map(thread.get("source"))
-        if source is not None:
-            subagent = _map(_first(source, "subagent", "subAgent"))
-            if subagent is not None:
-                spawn = _map(subagent.get("thread_spawn"))
-    if spawn is None:
-        return None
-    return {
-        "parent_thread_id": spawn.get("parent_thread_id"),
-        "agent_role": spawn.get("agent_role"),
-        "depth": spawn.get("depth"),
-    }
+_EFFECTIVE_KEYS = ("model", "modelProvider", "provider", "reasoningEffort", "reasoning_effort")
+_PUBLIC_METADATA_INVALID = "_public_metadata_invalid"
+
+
+def _normalize_effective(value: Any, label: str) -> tuple[dict[str, Any], list[str]]:
+    """Project known public fields and retain safe shape/conflict diagnostics."""
+    if value is None:
+        return {}, []
+    if not isinstance(value, Mapping):
+        return {}, [label + " has an unsupported public shape"]
+    result: dict[str, Any] = {}
+    errors: list[str] = []
+    for key in _EFFECTIVE_KEYS:
+        if key not in value:
+            continue
+        item = value[key]
+        if item is None:
+            result[key] = None
+        elif isinstance(item, str) and item.strip():
+            result[key] = item
+        else:
+            if label == "root client effective metadata" and key == "model":
+                errors.append("root client model has an unsupported public shape")
+            elif label == "root client effective metadata" and key in ("reasoningEffort", "reasoning_effort"):
+                errors.append("root client effort has an unsupported public shape")
+            else:
+                errors.append(label + " has an unsupported public shape")
+    for aliases, description in ((('modelProvider', 'provider'), 'provider'),
+                                 (('reasoningEffort', 'reasoning_effort'), 'effort')):
+        claims = [result[key] for key in aliases if key in result and result[key] is not None]
+        if len(set(claims)) > 1:
+            errors.append(label + " " + description + " aliases conflict")
+    return result, errors
+
+
+def _spawn_claims(thread: Mapping[str, Any]) -> tuple[dict[str, Any] | None, bool, bool]:
+    """Return a safe spawn claim, whether one was present, and shape conflict."""
+    candidates: list[Mapping[str, Any]] = []
+    invalid = False
+    for value in (thread.get("spawn"),):
+        if value is None:
+            continue
+        if isinstance(value, Mapping):
+            candidates.append(value)
+        else:
+            invalid = True
+    source = thread.get("source")
+    if source is not None and not isinstance(source, Mapping):
+        invalid = True
+    if isinstance(source, Mapping):
+        aliases: list[Mapping[str, Any]] = []
+        for alias in ("subagent", "subAgent"):
+            if alias not in source or source[alias] is None:
+                continue
+            subagent = source[alias]
+            if not isinstance(subagent, Mapping):
+                invalid = True
+                continue
+            birth = subagent.get("thread_spawn")
+            if birth is None:
+                continue
+            if isinstance(birth, Mapping):
+                aliases.append(birth)
+            else:
+                invalid = True
+        candidates.extend(aliases)
+    if not candidates:
+        return None, False, invalid
+    result: dict[str, Any] = {}
+    for key in ("parent_thread_id", "agent_role", "depth"):
+        values: list[Any] = []
+        for candidate in candidates:
+            if key not in candidate:
+                continue
+            item = candidate[key]
+            if item is None:
+                continue
+            if key == "depth":
+                if _finite_number(item) is None:
+                    invalid = True
+                    continue
+            elif not isinstance(item, str) or not item.strip():
+                invalid = True
+                continue
+            values.append(item)
+        if values:
+            if any(value != values[0] for value in values[1:]):
+                invalid = True
+            result[key] = values[0]
+    return result, True, invalid
+
+
+def normalize_public_thread_metadata(thread: Any) -> dict[str, Any]:
+    """Safely retain verifier-relevant fields and a fixed invalid-shape marker.
+
+    The marker carries no source values.  It prevents transport normalization
+    from turning a malformed known field into an apparently missing field.
+    """
+    if not isinstance(thread, Mapping):
+        return {_PUBLIC_METADATA_INVALID: True}
+    result: dict[str, Any] = {}
+    # Transport may already have projected this event.  Preserve only the
+    # boolean taint bit, never a value that caused it.
+    invalid = _bool(thread.get(_PUBLIC_METADATA_INVALID))
+    for key in ("id", "parentThreadId", "agentRole"):
+        if key not in thread:
+            continue
+        item = thread[key]
+        if (item is None or isinstance(item, str) and
+                (item.strip() or key == "parentThreadId")):
+            result[key] = item
+        else:
+            invalid = True
+    status = thread.get("status")
+    if status is not None and not isinstance(status, (Mapping, str)):
+        invalid = True
+    result["status"] = _safe_status(status)
+    spawn, spawn_present, spawn_invalid = _spawn_claims(thread)
+    invalid = invalid or spawn_invalid
+    if spawn_present and spawn is not None:
+        result["spawn"] = spawn
+
+    top, top_errors = _normalize_effective(thread, "child effective metadata")
+    invalid = invalid or bool(top_errors)
+    for key, value in top.items():
+        result[key] = value
+    for name in ("effective", "requested"):
+        if name not in thread or thread[name] is None:
+            continue
+        values, field_errors = _normalize_effective(thread[name], "child " + name + " metadata")
+        invalid = invalid or bool(field_errors)
+        if values:
+            result[name] = values
+    if invalid:
+        result[_PUBLIC_METADATA_INVALID] = True
+    return result
 
 
 def _safe_thread_metadata(thread: Mapping[str, Any]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key in ("id", "parentThreadId", "agentRole"):
-        if key in thread:
-            item = thread[key]
-            if isinstance(item, (str, int, float, bool)) or item is None:
-                result[key] = item
-    result["status"] = _safe_status(thread.get("status"))
-    spawn = _spawn_metadata(thread)
-    if spawn is not None:
-        result["spawn"] = spawn
-    # Public metadata may expose requested/effective child values.  Keep only
-    # scalar model/provider/effort fields; never preserve source/session data.
-    effective = _safe_effective(thread.get("effective"))
-    requested = _safe_effective(thread.get("requested"))
-    for key, value in _safe_effective(thread).items():
-        if key not in result and key in {"model", "modelProvider", "provider", "reasoningEffort", "reasoning_effort"}:
-            result[key] = value
-    if effective:
-        result["effective"] = effective
-    if requested:
-        result["requested"] = requested
-    return result
+    return normalize_public_thread_metadata(thread)
 
 
 def _thread_from_event(event: Mapping[str, Any]) -> Mapping[str, Any] | None:
@@ -695,8 +789,11 @@ class _PublicDerived:
     root_id: str = ""
     root_effective: dict[str, Any] = field(default_factory=dict)
     root_effectives: list[dict[str, Any]] = field(default_factory=list)
+    root_requested: dict[str, Any] = field(default_factory=dict)
+    root_request_count: int = 0
     child_ids: set[str] = field(default_factory=set)
     child_metadata: dict[str, dict[str, Any]] = field(default_factory=dict)
+    thread_started_metadata: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     metadata_count: dict[str, int] = field(default_factory=dict)
     read_results: set[str] = field(default_factory=set)
     read_requests: list[dict[str, Any]] = field(default_factory=list)
@@ -707,6 +804,7 @@ class _PublicDerived:
     turn_ends: dict[str, list[float | None]] = field(default_factory=dict)
     turn_start_ids: dict[str, list[str]] = field(default_factory=dict)
     turn_end_ids: dict[str, list[str]] = field(default_factory=dict)
+    turn_end_events: dict[str, list[str]] = field(default_factory=dict)
     turn_start_orders: dict[str, list[int]] = field(default_factory=dict)
     turn_end_orders: dict[str, list[int]] = field(default_factory=dict)
     turn_end_order: dict[str, int] = field(default_factory=dict)
@@ -733,6 +831,7 @@ def _derive_public(events: Any) -> _PublicDerived:
         derived.errors.append("public events are not a list")
         return derived
 
+    last_elapsed: float | None = None
     for index, event_value in enumerate(events):
         if not isinstance(event_value, Mapping):
             derived.errors.append("public event is not an object")
@@ -752,6 +851,10 @@ def _derive_public(events: Any) -> _PublicDerived:
             derived.errors.append("public elapsed timestamp is not finite")
         elif elapsed is not None and elapsed < 0:
             derived.errors.append("public elapsed timestamp is negative")
+        elif elapsed is not None:
+            if last_elapsed is not None and elapsed < last_elapsed:
+                derived.errors.append("public elapsed timestamps are not globally nondecreasing")
+            last_elapsed = elapsed
 
         # This flag is an out-of-band public result marker.  Check it before
         # the event-specific branches below because those branches intentionally
@@ -774,7 +877,13 @@ def _derive_public(events: Any) -> _PublicDerived:
                 effective_value = event.get("effective")
             if not isinstance(effective_value, Mapping):
                 effective_value = event
-            effective = _safe_effective(effective_value)
+            model_value = effective_value.get("model")
+            if "model" in effective_value and model_value is not None and (
+                not isinstance(model_value, str) or not model_value.strip()
+            ):
+                derived.errors.append("root client model has an unsupported public shape")
+            effective, effective_errors = _normalize_effective(effective_value, "root client effective metadata")
+            derived.errors.extend(effective_errors)
             if derived.root_effectives:
                 if effective != derived.root_effectives[-1]:
                     derived.errors.append("conflicting root client effective metadata")
@@ -784,6 +893,25 @@ def _derive_public(events: Any) -> _PublicDerived:
             derived.root_effective = effective
             continue
 
+        if name == "root/client-requested":
+            if thread_id:
+                derived.root_id = derived.root_id or thread_id
+            requested_value = event.get("metadata")
+            if not isinstance(requested_value, Mapping):
+                derived.errors.append("root client requested metadata has an unsupported public shape")
+            requested, request_errors = _normalize_effective(requested_value, "root client requested metadata")
+            derived.errors.extend(request_errors)
+            if isinstance(requested_value, Mapping) and "allowProviderModelFallback" in requested_value:
+                fallback = requested_value["allowProviderModelFallback"]
+                if fallback is not False:
+                    derived.errors.append("root client provider fallback was not explicitly disabled")
+                requested["allowProviderModelFallback"] = fallback if type(fallback) is bool else None
+            derived.root_request_count += 1
+            if derived.root_request_count > 1:
+                derived.errors.append("duplicate root client requested metadata")
+            derived.root_requested = requested
+            continue
+
         if name == "thread/started":
             thread = _thread_from_event(event)
             if thread is None:
@@ -791,6 +919,8 @@ def _derive_public(events: Any) -> _PublicDerived:
                 continue
             meta = _safe_thread_metadata(thread)
             identifier = _string(meta.get("id"))
+            if _bool(meta.get(_PUBLIC_METADATA_INVALID)):
+                derived.errors.append("public thread metadata has malformed known fields or conflicting aliases")
             if not identifier:
                 derived.errors.append("thread/started missing id")
             elif not derived.root_id and not _string(meta.get("parentThreadId")):
@@ -799,6 +929,8 @@ def _derive_public(events: Any) -> _PublicDerived:
                 derived.root_id = identifier
             else:
                 derived.child_ids.add(identifier)
+            if identifier:
+                derived.thread_started_metadata.setdefault(identifier, []).append(meta)
             continue
 
         if name == "child/public-metadata":
@@ -808,6 +940,8 @@ def _derive_public(events: Any) -> _PublicDerived:
                 continue
             meta = _safe_thread_metadata(thread)
             identifier = _string(meta.get("id"))
+            if _bool(meta.get(_PUBLIC_METADATA_INVALID)):
+                derived.errors.append("public thread metadata has malformed known fields or conflicting aliases")
             if not identifier:
                 derived.errors.append("child metadata missing id")
                 continue
@@ -855,11 +989,22 @@ def _derive_public(events: Any) -> _PublicDerived:
             if not thread_id:
                 derived.errors.append("turn event missing thread id")
             else:
+                turn = _turn_from_event(event)
+                sibling_present = "status" in event or "status" in params
+                sibling_status = (event.get("status") if "status" in event else
+                                  params.get("status"))
+                if (turn is not None and "status" in turn and sibling_present
+                        and sibling_status is not None and turn.get("status") is not None):
+                    sibling_type = _status_type(sibling_status)
+                    nested_type = _status_type(turn.get("status"))
+                    if sibling_type is None or nested_type is None or sibling_type != nested_type:
+                        derived.errors.append("turn status fields conflict")
                 status = _turn_status(event)
                 _append(derived.turn_statuses, thread_id, status)
                 _append(derived.turn_ends, thread_id, elapsed)
                 _append(derived.turn_end_ids, thread_id, _turn_id(event))
                 _append(derived.turn_end_orders, thread_id, index)
+                _append(derived.turn_end_events, thread_id, name)
                 derived.turn_end_order[thread_id] = index
             continue
 
@@ -881,11 +1026,22 @@ def _derive_public(events: Any) -> _PublicDerived:
                 # use these fields differently (or leave them null), so keep
                 # them only for the spawn-specific binding below.
                 if _string(item.get("tool")) == "spawnAgent":
+                    def spawn_claim(key: str, label: str) -> str | None:
+                        value = item.get(key)
+                        if key not in item or value is None:
+                            return None
+                        if not isinstance(value, str) or not value.strip():
+                            derived.errors.append(
+                                "spawn requested " + label + " has unsupported public shape"
+                            )
+                            return None
+                        return value
+
                     derived.spawn_tool_calls.append(
                         {
                             "id": _string(item.get("id")),
-                            "model": _string(item.get("model")),
-                            "reasoningEffort": _string(item.get("reasoningEffort")),
+                            "model": spawn_claim("model", "model"),
+                            "reasoningEffort": spawn_claim("reasoningEffort", "effort"),
                         }
                     )
             elif item_type == "commandExecution":
@@ -930,7 +1086,9 @@ def _validation_result(derived: _PublicDerived, errors: list[str], overlap: floa
     }
 
 
-def validate_public_events(events: list[dict[str, Any]], expected_role: str = DEFAULT_EXPECTED_ROLE) -> dict[str, Any]:
+def validate_public_events(events: list[dict[str, Any]], expected_role: str = DEFAULT_EXPECTED_ROLE, *,
+                           requested_root_model: str | None = None,
+                           requested_root_effort: str | None = None) -> dict[str, Any]:
     """Validate normalized public lifecycle evidence with strict lineage.
 
     Callers should pass the already-sanitized event list emitted by the
@@ -945,13 +1103,31 @@ def validate_public_events(events: list[dict[str, Any]], expected_role: str = DE
         errors.append("expected role is not adaptive_luna")
 
     effective = derived.root_effective
-    if _string(effective.get("model")) != "gpt-6-astra":
-        errors.append("root client model is not gpt-6-astra")
+    effective_model = effective.get("model")
+    if requested_root_model is not None and effective_model != requested_root_model:
+        errors.append("root client effective model differs from requested model")
+    effort_values = [effective[key] for key in ("reasoningEffort", "reasoning_effort") if key in effective]
+    observed_efforts = [value for value in effort_values if isinstance(value, str)]
+    if len(set(observed_efforts)) > 1:
+        errors.append("root client effort fields conflict")
     reasoning = _string(effective.get("reasoningEffort")) or _string(effective.get("reasoning_effort"))
-    if reasoning != "max":
-        errors.append("root client reasoning effort is not max")
+    if requested_root_effort is not None and reasoning != requested_root_effort:
+        errors.append("root client effective effort differs from requested effort")
+    claimed_root_model = derived.root_requested.get("model")
+    if claimed_root_model is not None and effective_model != claimed_root_model:
+        errors.append("root client effective model differs from public requested model")
+    requested_effort_values = [derived.root_requested[key] for key in ("reasoningEffort", "reasoning_effort")
+                               if key in derived.root_requested and derived.root_requested[key] is not None]
+    if requested_effort_values and any(value != reasoning for value in requested_effort_values):
+        errors.append("root client effective effort differs from public requested effort")
+    request_providers = [derived.root_requested[key] for key in ("modelProvider", "provider")
+                         if key in derived.root_requested and derived.root_requested[key] is not None]
+    if request_providers and any(value != "openai" for value in request_providers):
+        errors.append("root client requested provider is not openai")
     provider = _string(effective.get("modelProvider")) or _string(effective.get("provider"))
-    if provider != "openai":
+    providers = [effective[key] for key in ("modelProvider", "provider")
+                 if key in effective and effective[key] is not None]
+    if not providers or any(value != "openai" for value in providers) or provider != "openai":
         errors.append("root client provider is not openai")
     if not derived.root_id:
         errors.append("missing root thread id")
@@ -959,10 +1135,10 @@ def validate_public_events(events: list[dict[str, Any]], expected_role: str = DE
     expected_effort = expected.removeprefix("adaptive_luna_")
     for call in derived.spawn_tool_calls:
         # Missing/null values remain compatible with older public streams.  A
-        # present string is evidence and must agree with the selected role.
-        if call["model"] and call["model"] != "gpt-6-luna":
+        # present, nonempty string is evidence and must agree with the selected role.
+        if call["model"] is not None and call["model"] != "gpt-6-luna":
             errors.append("spawn requested model is not gpt-6-luna")
-        if call["reasoningEffort"] and call["reasoningEffort"] != expected_effort:
+        if call["reasoningEffort"] is not None and call["reasoningEffort"] != expected_effort:
             errors.append("spawn requested effort mismatch")
 
     root_turns = derived.turn_statuses.get(derived.root_id, [])
@@ -970,6 +1146,20 @@ def validate_public_events(events: list[dict[str, Any]], expected_role: str = DE
         errors.append("root turn did not complete successfully")
     if any(status != "completed" for status in root_turns):
         errors.append("root has a failed turn status")
+    root_starts = derived.turn_starts.get(derived.root_id, [])
+    root_ends = derived.turn_ends.get(derived.root_id, [])
+    root_start_ids = derived.turn_start_ids.get(derived.root_id, [])
+    root_end_ids = derived.turn_end_ids.get(derived.root_id, [])
+    root_start_orders = derived.turn_start_orders.get(derived.root_id, [])
+    root_end_orders = derived.turn_end_orders.get(derived.root_id, [])
+    root_end_events = derived.turn_end_events.get(derived.root_id, [])
+    if (len(root_starts) != 1 or len(root_ends) != 1 or len(root_turns) != 1
+            or len(root_end_events) != 1 or root_end_events != ["turn/completed"]
+            or not root_start_ids or root_start_ids != root_end_ids
+            or not all(root_start_ids) or len(root_start_orders) != 1 or len(root_end_orders) != 1
+            or root_start_orders[0] >= root_end_orders[0]
+            or root_starts[0] is None or root_ends[0] is None or root_ends[0] <= root_starts[0]):
+        errors.append("root turn start/completion pair is not exact and chronological")
 
     if len(derived.child_ids) != 2:
         errors.append("expected exactly two native child threads")
@@ -1027,16 +1217,40 @@ def validate_public_events(events: list[dict[str, Any]], expected_role: str = DE
                 depth = spawn.get("depth")
                 if isinstance(depth, bool) or _finite_number(depth) != 1:
                     errors.append("child spawn depth is not one: " + identifier)
-            # If public metadata reports child model/effort, bind both values
-            # to the selected Luna role rather than trusting self-reported text.
-            child_values = metadata.get("effective") if isinstance(metadata.get("effective"), Mapping) else metadata
-            child_model = _string(child_values.get("model")) if isinstance(child_values, Mapping) else ""
-            child_effort = _string(child_values.get("reasoningEffort")) or (_string(child_values.get("reasoning_effort")) if isinstance(child_values, Mapping) else "")
-            if child_model and child_model != "gpt-6-luna":
-                errors.append("child effective model is not gpt-6-luna: " + identifier)
             expected_effort = expected.removeprefix("adaptive_luna_")
-            if child_effort and child_effort != expected_effort:
-                errors.append("child effective effort mismatch: " + identifier)
+            claim_sources = [metadata, *derived.thread_started_metadata.get(identifier, [])]
+            claims = list(claim_sources)
+            for source in claim_sources:
+                for name in ("effective", "requested"):
+                    nested = source.get(name)
+                    if isinstance(nested, Mapping):
+                        claims.append(nested)
+            for claim in claims:
+                model = claim.get("model")
+                if model is not None and model != "gpt-6-luna":
+                    label = "requested" if claim is metadata.get("requested") else "effective"
+                    errors.append("child " + label + " model is not gpt-6-luna: " + identifier)
+                efforts = [claim[key] for key in ("reasoningEffort", "reasoning_effort")
+                           if key in claim and claim[key] is not None]
+                if any(value != expected_effort for value in efforts):
+                    label = "requested" if claim is metadata.get("requested") else "effective"
+                    errors.append("child " + label + " effort mismatch: " + identifier)
+                providers = [claim[key] for key in ("modelProvider", "provider")
+                             if key in claim and claim[key] is not None]
+                if any(value != "openai" for value in providers):
+                    errors.append("child provider is not openai: " + identifier)
+            # A later read cannot rewrite contradictory public birth metadata.
+            for started in derived.thread_started_metadata.get(identifier, []):
+                for key in ("id", "parentThreadId", "agentRole"):
+                    first, final = started.get(key), metadata.get(key)
+                    if first is not None and final is not None and first != final:
+                        errors.append("child thread/started conflicts with final metadata: " + identifier)
+                first_spawn, final_spawn = _map(started.get("spawn")), _map(metadata.get("spawn"))
+                if first_spawn is not None and final_spawn is not None:
+                    for key in ("parent_thread_id", "agent_role", "depth"):
+                        first, final = first_spawn.get(key), final_spawn.get(key)
+                        if first is not None and final is not None and first != final:
+                            errors.append("child thread/started spawn conflicts with final metadata: " + identifier)
             statuses = derived.thread_statuses.get(identifier, [])
             if not statuses or statuses[-1] != "idle":
                 errors.append("child has no final idle status event: " + identifier)
@@ -1057,6 +1271,7 @@ def validate_public_events(events: list[dict[str, Any]], expected_role: str = DE
             errors.append("child has a failed turn status: " + identifier)
         paired = (bool(starts) and len(starts) == len(ends) == len(turn_statuses)
                   and start_ids == end_ids and all(start_ids)
+                  and derived.turn_end_events.get(identifier, []) == ["turn/completed"] * len(turn_statuses)
                   and len(set(start_ids)) == len(start_ids))
         if not paired:
             errors.append("child turn start/completion pair is not exact: " + identifier)
@@ -1120,7 +1335,10 @@ def validate_public_events(events: list[dict[str, Any]], expected_role: str = DE
     if derived.tests_failed:
         errors.append("independent smoke tests reported failure")
 
-    return _validation_result(derived, errors, overlap, windows, expected)
+    result = _validation_result(derived, errors, overlap, windows, expected)
+    result["root_requested"] = {"model": requested_root_model, "reasoningEffort": requested_root_effort,
+                                "modelProvider": "openai", "allowProviderModelFallback": False}
+    return result
 
 
 def validate_public_evidence(events: list[dict[str, Any]], expected_role: str = DEFAULT_EXPECTED_ROLE) -> dict[str, Any]:
@@ -1132,6 +1350,8 @@ def validate_public_evidence(events: list[dict[str, Any]], expected_role: str = 
 # The Python transport is owned by the main agent so its process lifecycle can
 # be reviewed alongside the platform implementation.  Keep this forwarding
 # function tiny and import lazily to avoid a module cycle during CLI startup.
-def run(home: Path, codex: str, project: Path, output: Path, role: str) -> dict[str, Any]:
+def run(home: Path, codex: str, project: Path, output: Path, role: str | None = None, *,
+        root_model: str | None = None, root_effort: str | None = None, select_role=None) -> dict[str, Any]:
     from . import transport
-    return transport.run(Path(home), str(codex), Path(project), Path(output), str(role))
+    return transport.run(Path(home), str(codex), Path(project), Path(output), role,
+                         root_model=root_model, root_effort=root_effort, select_role=select_role)

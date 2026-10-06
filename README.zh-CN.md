@@ -1,6 +1,6 @@
-# Codex Adaptive Agents 0.7.0
+# Codex Adaptive Agents 0.8.0
 
-**让 Astra 负责规划与验收，让原生 Luna 子 Agent 执行明确的独立任务。**
+**让主 Agent 按当前子模型能力选择 Luna 角色，负责规划与验收。**
 
 [English](README.md) · 简体中文 · [验证记录](docs/VALIDATION.md) · [操作指南](docs/PUBLIC_GUIDE.md)
 
@@ -29,14 +29,14 @@ https://github.com/aweiht/codex-adaptive-agents
 
 ### 第二步：新建 Codex 任务，复制这段验证
 
-这一步检查安装和角色选档，不额外启动模型验收任务。`READY` 或 `READY_FALLBACK` 且选档成功，表示本地安装检查通过。
+这一步分别检查本地安装状态和子角色选档，不额外启动模型验收任务。`READY` 或 `READY_FALLBACK` 表示本地安装就绪；选档成功表示当前子模型能力和策略允许选择一个角色。
 
 ```text
 请验证本机 Codex Adaptive Agents 是否安装成功：
 https://github.com/aweiht/codex-adaptive-agents
-使用当前 Codex 的 CODEX_HOME，找到 `CODEX_HOME/codex-adaptive-agents/runtime/codex-adaptive-agents.py`。用 Python 3.11+（macOS/Linux 用 `python3`，Windows 用 `py -3`）通过这个已安装入口运行 `python3 "$CODEX_HOME/codex-adaptive-agents/runtime/codex-adaptive-agents.py" --codex-home "$CODEX_HOME" doctor`（Windows 使用对应的 `py -3` 命令），再在独立临时目录运行 `select --project <临时目录> --explain`。
-只有 doctor 报告能力快照或选档缓存过期时才运行 `refresh`，然后再次检查 doctor；核对选档返回已安装的 `adaptive_luna_*` 角色。
-不要重新安装、修改业务文件、运行 verify --live、调用模型，也不要把选档当成已经调用子 Agent。只有 doctor 为 READY 或 READY_FALLBACK 且选档成功，才报告“本地安装检查通过”；同时展示实际状态、选中角色和失败原因。
+使用当前 Codex 的 CODEX_HOME，找到 `CODEX_HOME/codex-adaptive-agents/runtime/codex-adaptive-agents.py`。用 Python 3.11+（macOS/Linux 用 `python3`，Windows 用 `py -3`）通过这个已安装入口运行 `python3 "$CODEX_HOME/codex-adaptive-agents/runtime/codex-adaptive-agents.py" --codex-home "$CODEX_HOME" doctor`（Windows 使用对应的 `py -3` 命令），再在独立临时目录运行 `select --project <临时目录> --explain`。不需要主模型参数或人工确认。
+只有 doctor 报告子模型能力快照或选档缓存过期时才运行 `refresh`，然后再次检查 doctor；如果本机 Luna 能力和策略数据有效，核对选档返回已安装的 `adaptive_luna_*` 角色。
+不要重新安装、修改业务文件、运行 verify --live、调用模型，也不要把选档当成已经调用子 Agent。根据 doctor 单独报告安装就绪状态，并展示实际状态和失败原因。
 ```
 
 ### 第三步：复制这段，让 Codex 升级已有安装
@@ -62,7 +62,8 @@ https://github.com/aweiht/codex-adaptive-agents
 ## 安装前准备
 
 - Python **3.11 或更新版本**。
-- 可运行的官方 Codex CLI **0.147.0 或更新版本**，以及支持原生自定义 Agent 的 Codex 客户端。CLI 的公开模型目录需要包含 Astra Max 与 `gpt-6-luna` 的 `low / medium / high / xhigh / max` 五档。
+- 可运行的官方 Codex CLI **0.147.0 或更新版本**，以及支持原生自定义 Agent 的 Codex 客户端。CLI 的公开模型目录需要包含子模型 `gpt-6-luna` 的 `low / medium / high / xhigh / max` 五档。
+- 委派不按主模型身份筛选；安装和选档只检查 Luna 子模型能力与策略。
 - 日常使用和真实验收需要正常的 Codex 登录、所需模型访问权限及可用额度。安装检查模型目录，不代表账号一定能完成模型任务。
 - 网络能读取公开模型目录和选档数据源；用 Git 下载时还需 Git。也可以通过 GitHub 的 **Code → Download ZIP** 下载源码。
 
@@ -119,6 +120,12 @@ python3 codex-adaptive-agents.py --codex-home /path/to/codex-home --codex /path/
 
 委派前脚本按**系统本地自然日**选择一个支持的 Luna 档位；项目缓存保存在 `.codex-adaptive-agents/state`。请将 `.codex-adaptive-agents/` 加入业务项目的 `.gitignore`。网站查不到 GPT-6 Luna 评分、请求失败或评分无法可靠比较时，默认回退到 `xhigh`；仍须通过本机模型能力检查，不保证降档、省钱或提速。
 
+### 主模型与实时验收参数
+
+`select` 不读取、不要求也不按主模型限制委派。主模型缺失、unknown、当前型号或未来型号都走相同的 Luna 子能力与策略检查；`--root-model` 在 `select` 中仅为兼容参数，会被忽略。安装、选档和验收均不改写用户的主模型或思考强度。`model_policy.json` 保留在运行时文件布局中以兼容已有安装回执，其内容是 unrestricted 元数据，没有主模型名单，也不用于识别当前身份。
+
+主模型思考强度没有插件白名单或强制 `max`。`verify --live` 默认遵从官方客户端、不覆盖主模型或 effort，也不按主模型门禁；显式提供的 `--root-model` / `--root-effort` 只是请求覆盖，必须与公开 effective 值精确匹配。effective 字段缺失或 null 时保留为不可观测，不能伪造身份元数据。该 CLI 不自动读取另一个桌面任务的窗口身份。
+
 ### 委派门槛与例子
 
 只要安全工作包具备明确目标、边界、产物或问题归属和可查证验收，用户未禁止且宿主允许，就必须先实际派发给 Luna，再开始该工作包。这个路由规则是试用策略，不承诺 token 更低或完成更快，不设总成本、耗时或预期节省门槛，不设 2:8 等固定比例，也不增加 usage 采集系统。不能把整批实质工作拆成多个“一次小改”来规避评估。
@@ -143,13 +150,13 @@ python3 codex-adaptive-agents.py --codex-home /path/to/codex-home --codex /path/
 
 先分类再处理。并发已满时，复用已停止写入且角色/模型边界合适的 Luna，或用原生等待等现有工作完成；不能为腾名额中断他人。新建子 Agent 失败不代表已有叶子不能继续；没有关闭操作就不宣称名额已释放。临时限流、网络或服务错误遵守明确的 `retry-after`；没有提示时依次等待 30 秒、2 分钟、5 分钟。不论是否有提示，同一故障额外最多重试 3 次；提示只改变等待时长，不增加次数。用原生等待，避免频繁探测。预算用尽后不再自行开启退避；只有新的、尚未消费的明确恢复事件或可查证状态变化才允许真实重试一次，并将该事件标记为已消费。若失败，过去的同一重置时间或状态变化不能在新回合再次触发；保留累计记录并等待新的恢复事件。
 
-明确配额耗尽且有重置时间时，等到该时间后复查一次、不提前探测，并将该重置事件标记为已消费；没有重置时间时不猜时间、不盲目重试，只在有新的可查证状态或用户处理后恢复尝试。同一过去的重置时间或已消费状态变化不能再次触发。到了重置时间不代表已经恢复。认证、权限、参数或角色错误先定位并真实修正原因，再有界重试；未经授权不改账户或权限设置。恢复未明时，主 Agent 可在当前授权内临时完成一个事先写清范围和收口点的小工作包，到点即结束。不能把每个后续包都叫“临时接管”而无限交给 Astra：若后续仍依赖 Luna 且没有新的恢复证据，保留待交接项并写明恢复条件；要扩大 Astra 执行须由用户决定。其他不依赖该故障的工作可继续。取得本轮原生派发已恢复的真实证据后，在安全边界交回剩余工作；主 Agent 停止写同一范围，记录已有证据、剩余工作和新 owner。普通测试失败仍由原工作包 owner 修复。
+明确配额耗尽且有重置时间时，等到该时间后复查一次、不提前探测，并将该重置事件标记为已消费；没有重置时间时不猜时间、不盲目重试，只在有新的可查证状态或用户处理后恢复尝试。同一过去的重置时间或已消费状态变化不能再次触发。到了重置时间不代表已经恢复。认证、权限、参数或角色错误先定位并真实修正原因，再有界重试；未经授权不改账户或权限设置。恢复未明时，主 Agent 可在当前授权内临时完成一个事先写清范围和收口点的小工作包，到点即结束。不能把每个后续包都叫“临时接管”而无限交给主 Agent：若后续仍依赖 Luna 且没有新的恢复证据，保留待交接项并写明恢复条件；要扩大主 Agent 执行须由用户决定。其他不依赖该故障的工作可继续。取得本轮原生派发已恢复的真实证据后，在安全边界交回剩余工作；主 Agent 停止写同一范围，记录已有证据、剩余工作和新 owner。普通测试失败仍由原工作包 owner 修复。
 
 回复末尾的执行摘要形如：
 
 ```text
-Astra/Luna: direct · luna ×0
-Astra/Luna: delegated · luna_max ×2 · parallel
+主 Agent/Luna: direct · luna ×0
+主 Agent/Luna: delegated · luna_max ×2 · parallel
 ```
 
 这里只展示任务实际发生的委派：子 Agent 的档位来自派发角色或调用参数，数量按实际运行的直接子 Agent 统计。主控只显示模型名，不读取或展示当前窗口的思考强度；示例不是本次运行结果。
@@ -170,9 +177,9 @@ python3 codex-adaptive-agents.py select --project .
 
 Windows 把 `python3` 换成 `py -3`。`doctor` 检查本地安装，不调用模型、不联网。`select` 只选择角色，必要时刷新公开数据；输出 `adaptive_luna_xhigh` 等角色名，**不会启动 Luna**。
 
-![实际 doctor 和 select 命令输出摘录](docs/images/cli-check.svg)
+![主模型无关的角色选档输出示例](docs/images/cli-check.svg)
 
-*这是 2026-09-23 本地 0.7.0 安装的实际 doctor 和 select 输出摘录，省略私有路径。它说明安装与选档检查结果，不是 Codex 窗口截图，也不是模型任务验收。*
+*这是主模型无关的本地选择器实际输出；使用临时安装和本地合成 fallback 缓存，不调用模型。*
 
 | 输出 | 含义与下一步 |
 | --- | --- |
@@ -189,7 +196,7 @@ Windows 把 `python3` 换成 `py -3`。`doctor` 检查本地安装，不调用�
 请为本机 Codex Adaptive Agents 运行一次真实原生委派验收：
 https://github.com/aweiht/codex-adaptive-agents
 我同意本次 verify --live 使用真实 Codex 额度，最多两个直接 Luna 子 Agent，600 秒上限，不自动重试。
-使用当前 CODEX_HOME 下 `codex-adaptive-agents/runtime/codex-adaptive-agents.py` 的已安装入口，并用 Python 3.11+ 运行；先检查 doctor，通过后运行 verify --live。
+使用当前 CODEX_HOME 下 `codex-adaptive-agents/runtime/codex-adaptive-agents.py` 的已安装入口，并用 Python 3.11+ 运行；先检查 doctor，通过后运行 verify --live。默认不要覆盖主模型或 effort；只有我明确提供 `--root-model` / `--root-effort` 时才传入，并精确核对公开有效值。
 使用命令默认创建的独立临时验收目录，保留结果，不使用已有业务目录。
 检查命令结果和产物；只有返回 LIVE_VERIFIED 才报告真实委派通过，否则说明失败原因。
 最后给出本地检查结果、真实委派结果及验收文件位置，不用模型自述或选档结果代替证据。
@@ -200,6 +207,8 @@ https://github.com/aweiht/codex-adaptive-agents
 ```sh
 python3 codex-adaptive-agents.py verify --live
 ```
+
+默认 live 命令不覆盖 root model 或 effort，也不按 effective 主模型门禁。只有显式传入的 `--root-model` / `--root-effort` 才会覆盖，并要求请求值与有效值完全一致。它不会自动读取桌面任务当前窗口身份。
 
 进程清理存在平台边界：macOS 极短命中间进程连续 fork 后可能隐藏后代关系，不能把辅助脚本当成安全沙箱。详见[清理边界](docs/PUBLIC_GUIDE.md#process-cleanup-boundary)。
 
@@ -213,12 +222,12 @@ python3 codex-adaptive-agents.py verify --live
 | --- | --- |
 | 找不到 `python3` / `py` | 安装 Python 3.11+，或使用已安装 Python 的完整路径。 |
 | 找不到 `codex` | 确认同一个终端能运行 `codex --version`；必要时通过 `--codex PATH` 指定路径。 |
-| 安装报模型目录不兼容，或空白 home 报 `input or file operation failed` | 检查使用的 Codex home、CLI 版本和模型目录；在同一环境运行 `codex debug models`。要求的 Astra/Luna 型号与档位缺失时，安装不会继续。 |
+| 安装报模型目录不兼容，或空白 home 报 `input or file operation failed` | 检查使用的 Codex home、CLI 版本和模型目录；在同一环境运行 `codex debug models`。`gpt-6-luna` 五档缺失时，安装不会继续。 |
 | `doctor` 提示快照或缓存不可用 | 先查看诊断，只运行一次 `python3 codex-adaptive-agents.py refresh`，再运行 `doctor`。仍失败时保留实际错误并停止重复刷新。`refresh` 读取公开数据，不调用模型。 |
 | 某个项目同一天选档失败后仍被阻塞 | 查看诊断，只运行一次 `python3 codex-adaptive-agents.py refresh --project /path/to/project`，再对同一项目运行 `select --explain`；不带 `--project` 的 `refresh` 只更新 home 级策略。此命令更新选档输入，不重试原生派发，也不能证明配额已恢复。 |
 | 修改过受管角色后升级失败 | 保留改动，检查冲突并决定如何合并；不要直接覆盖文件或安装凭据。 |
 | 安装后没有使用 Luna | 先开始新 Codex 任务；简单任务直接完成是正常情况。需要独立验收时使用显式的 `verify --live`。 |
-| Windows / Linux 的真实模型任务是否已验证？ | 本轮没有请求新的 live 模型验收；历史 CI 只对其具体提交有效，不代表当前 0.7.0。详见[验证记录](docs/VALIDATION.md)。 |
+| Windows / Linux 的真实模型任务是否已验证？ | 本轮没有请求新的 live 模型验收；历史 CI 只对其具体提交有效，不代表当前 0.8.0。详见[验证记录](docs/VALIDATION.md)。 |
 
 ## 更新、卸载与恢复
 
@@ -253,10 +262,10 @@ python3 codex-adaptive-agents.py uninstall --yes
 
 ```sh
 python3 -m unittest discover -s tests_python -p 'test_*.py' -v
-python3 scripts/release_python.py --output-dir dist/0.7.0-python
+python3 scripts/release_python.py --output-dir dist/0.8.0-python
 ```
 
-打包目录须是新的，脚本不会覆盖已有发行包。源码包包含中英文文档、运行图片、测试和校验和。本轮 0.7.0 的证据受具体源码修订和环境限制；没有请求新的 live 模型验收，历史 CI 也不代表当前源码。详见[验证记录](docs/VALIDATION.md)与[贡献指南](CONTRIBUTING.md)。
+打包目录须是新的，脚本不会覆盖已有发行包。源码包包含中英文文档、运行图片、测试和校验和。本轮 0.8.0 的证据受具体源码修订和环境限制；没有请求新的 live 模型验收，历史 CI 也不代表当前源码。详见[验证记录](docs/VALIDATION.md)与[贡献指南](CONTRIBUTING.md)。
 
 ## 许可与实现
 

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "project": "codex-adaptive-agents",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "release": "python-source",
   "status": "SOURCE_READY",
   "license": "Apache-2.0",
@@ -13,7 +13,7 @@
   "checksums": {
     "package_file": "SHA256SUMS",
     "package_coverage": "every regular payload file except SHA256SUMS itself",
-    "external_file": "dist/0.7.0-python/SHA256SUMS",
+    "external_file": "dist/0.8.0-python/SHA256SUMS",
     "external_coverage": "every archive produced in this invocation"
   },
   "public_files": [
@@ -56,6 +56,7 @@
       "docs/PUBLIC_GUIDE.md",
       "docs/VALIDATION.md",
       "docs/UPSTREAM.md",
+      "codex_adaptive_agents/model_policy.json",
       "codex-adaptive-agents.py",
       "scripts/release_python.py"
     ],
@@ -105,7 +106,7 @@
   ],
   "verification": {
     "source_tests": "python3 -m unittest discover -s tests_python -p 'test_*.py' -v",
-    "package_build": "python3 scripts/release_python.py --output-dir dist/0.7.0-python",
+    "package_build": "python3 scripts/release_python.py --output-dir dist/0.8.0-python",
     "doctor": "python3 codex-adaptive-agents.py doctor",
     "live": "python3 codex-adaptive-agents.py verify --live --project PATH --output PATH",
     "live_timeout_seconds": 600,
@@ -113,7 +114,7 @@
     "live_transport": "official transient stdio app-server test channel",
     "live_uses_model_quota": true,
     "remote_ci": "https://github.com/aweiht/codex-adaptive-agents/actions/workflows/native.yml",
-    "live_result": "not rerun for 0.7.0; local installation and offline tests do not establish live model access"
+    "live_result": "not rerun for 0.8.0; local installation and offline tests do not establish live model access"
   },
   "support": {
     "python": "3.11+ standard library; no pip, Go, or compiled binary",

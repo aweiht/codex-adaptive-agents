@@ -1,6 +1,6 @@
 # Codex Adaptive Agents public operator guide
 
-**0.7.0 status: SOURCE_READY.** Codex Adaptive Agents uses the project
+**0.8.0 status: SOURCE_READY.** Codex Adaptive Agents uses the project
 repository at <https://github.com/aweiht/codex-adaptive-agents>. The package
 contains the Python source used at runtime. No new live model verification was
 requested for this revision. Consult [VALIDATION.md](VALIDATION.md) for current
@@ -13,6 +13,15 @@ public smoke assets, tests_python, public Markdown, LICENSE, NOTICE, VERSION,
 release-manifest.json, the release script, and SHA256SUMS. Source equals
 runtime under the checked-in allowlist.
 
+The release builder rejects source links, uses no-follow opens relative to
+checked directory handles on POSIX, and verifies each opened file descriptor
+against the checked file identity before reading. It stages the captured bytes
+and validates the ZIP against the same complete source snapshot:
+missing or extra payloads and payload edits are rejected even if the ZIP's own
+SHA256SUMS was recomputed. Explicit ZIP directories are limited to ancestors of
+allowlisted files. The in-package checksum detects accidental changes; it is
+not a signature or proof of publisher authenticity.
+
 It requires Python 3.11 or newer from the standard library. It has no pip
 dependency, Go requirement, or compiled binary. The package does not include
 historical implementations, private development evidence, local state, or old
@@ -20,7 +29,10 @@ release archives.
 
 The entry script accepts --codex-home PATH and --codex PATH before a subcommand.
 The home defaults to CODEX_HOME and then the platform normal user Codex home.
-The official client command defaults to codex.
+The official client command defaults to `codex` resolved from the caller's normal
+`PATH`; pass `--codex PATH` to choose an explicit executable. A path recorded in
+an earlier capability snapshot is provenance only and is never run as an
+implicit command.
 
 ## Installation state
 
@@ -42,7 +54,8 @@ py -3 .\codex-adaptive-agents.py --codex-home "$env:USERPROFILE\.codex" doctor
 
 The --yes flag applies a fresh managed plan. Add --plan-id HASH to bind a
 previously reviewed preview. Before writing, the installer
-checks the official CLI and public model catalogue. It hashes managed inputs,
+checks the official CLI and GPT-6 Luna's five public child effort levels. Root
+model identity and reasoning effort are not plugin eligibility gates. It hashes managed inputs,
 creates a private backup, writes atomically, and verifies the result. It does
 not read authentication files or claim that the account can complete a live
 task.
@@ -131,13 +144,34 @@ python3 codex-adaptive-agents.py select --project /path/to/project --explain
 python3 codex-adaptive-agents.py refresh
 ~~~
 
+### Main-model independence
+
+`select` does not read, require, or gate on the main model. Missing, unknown,
+current, and future model slugs all use the same Luna child capability and
+selection policy. `--root-model` is accepted by `select` only for command-line
+compatibility and is ignored there. The file
+`codex_adaptive_agents/model_policy.json` remains in the runtime layout so
+existing install receipts keep their exact path contract; it now contains only
+unrestricted metadata and is not read by the selector. The plugin does not
+change the user's main model or reasoning effort.
+
+The root effort has no plugin whitelist or forced `max`; the official client
+chooses what it supports. `refresh` and `doctor` maintain/check child
+capabilities without consulting root identity.
+
 Each project keeps its policy cache in .codex-adaptive-agents/state; projects should
 ignore .codex-adaptive-agents/. A next-day delegation attempt can refresh an expired
 project policy. Use refresh --project /path/to/project once to update policy inputs
-after a same-day selection failure. Without --project, refresh updates home-level
-policy state. Both forms refresh the global public capability snapshot and leave
-unrelated project caches intact. They do not retry a native child dispatch or
-establish quota recovery; if refresh fails, keep the actual error and do not loop.
+after a same-day selection failure. An ordinary `select` that finds malformed
+JSON or a semantically invalid policy cache returns `blocked` and leaves that
+cache unchanged. A normal next-day selection can still use its one daily refresh
+attempt for an expired but structurally valid cache. The explicit `refresh`
+command refreshes the public capability snapshot, then rechecks policy-cache
+state under the refresh lock before rebuilding; it does not silently treat a
+damaged previous result as valid. Without `--project`, refresh updates home-level
+policy state. Both forms leave unrelated project caches intact. They do not
+retry a native child dispatch or establish quota recovery; if refresh fails,
+keep the actual error and do not loop.
 
 The child model is `gpt-6-luna`. If public sources have no usable scores for
 this exact model, the selector retains a still-valid verified cache or falls
@@ -352,13 +386,20 @@ py -3 $Entry --codex-home $CodexHome process-cleanup --project C:\path\to\projec
 
 verify --live is explicit, uses real Codex allowance, and starts at most two
 direct native Luna children with the selected role. It is bounded at 600
-seconds:
+seconds. By default it sends no root model or effort override and does not
+gate on root identity. Optional `--root-model` and `--root-effort` values are
+explicit request overrides and must exactly match the public effective values
+before a turn starts. Missing or null public root fields remain unknown; no
+plugin effort allowlist applies.
 
 ~~~sh
 python3 codex-adaptive-agents.py verify --live \
   --project /path/to/smoke-project \
   --output /path/to/verification-output
 ~~~
+
+The CLI uses the official client's own defaults; it does not read a separate
+desktop Codex task's active model.
 
 The command creates a temporary official stdio app-server test channel. That
 channel exists only for the check; it is not an installed MCP server, daemon,
@@ -423,7 +464,23 @@ python3 scripts/release_python.py --output-dir /tmp/codex-adaptive-agents-releas
 The in-package SHA256SUMS covers each regular payload file except itself. The
 external checksum file covers each archive produced in that invocation. The
 builder rejects source symlinks, unsafe archive members, private Markdown
-paths, broken local Markdown links, and overwriting an existing archive.
+paths, broken local Markdown links, and overwriting an existing archive. Source
+files are opened relative to no-follow directory handles where the platform
+supports them, then read through the same descriptor whose `fstat` identity was
+checked. Archive and checksum outputs use exclusive creation and verify the
+created file identity; a raced destination symlink or pre-existing destination
+is rejected without writing through it. Newly created files are visible while
+being written, so a process interruption can leave a partial file that must be
+removed manually before retrying.
+
+Windows Python's standard library does not expose the same directory-relative
+open operations. There, the builder rejects reparse points and checks the
+opened file identity and parent directory chain before and after path-based
+access. This catches file and persistent parent-link substitutions, but cannot
+prove safety against a same-user actor that swaps a parent directory away and
+back during the path-based operation. POSIX directory handles prevent raced
+symlink redirection; concurrent renames of an already-open directory remain an
+OS namespace race outside this check.
 
 Source tests and package inspection are offline checks. They do not establish
 model access, current quota, live delegation, or publication. See LICENSE,

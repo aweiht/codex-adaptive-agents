@@ -9,6 +9,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from codex_adaptive_agents import cli, install, policy, process_registry, verify
@@ -16,6 +17,51 @@ from codex_adaptive_agents.platform import clean_env, run
 
 
 class CLITests(unittest.TestCase):
+    def test_doctor_ignores_snapshot_executable_and_resolves_normal_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory).resolve() / 'home'
+            resource = home / install.RESOURCE
+            resource.mkdir(parents=True)
+            marker = Path(directory).resolve() / 'snapshot-executable-ran'
+            fake = Path(directory).resolve() / 'snapshot-codex'
+            fake.write_text('#!/bin/sh\ntouch ' + str(marker) + '\n', encoding='utf-8')
+            fake.chmod(0o755)
+            (resource / 'capabilities.json').write_text(
+                json.dumps({'schema': 2, 'codex': str(fake)}), encoding='utf-8')
+            with patch.object(install, 'validate', return_value={'schema': 4, 'version': install.__version__}), \
+                    patch.object(install, 'build'), \
+                    patch.object(cli, 'read', return_value=b''), \
+                    patch.object(install, 'desired', return_value={}), \
+                    patch.object(install, 'transform', return_value=(b'', [])), \
+                    patch.object(cli.shutil, 'which', return_value='/normal/PATH/codex') as which, \
+                    patch.object(policy, 'doctor_capabilities', return_value={'status': 'READY'}) as capabilities, \
+                    patch.object(policy, 'cached_select', return_value={'role': 'adaptive_luna_xhigh',
+                          'status': 'fallback'}), \
+                    patch.object(cli, 'run', return_value=SimpleNamespace(
+                        returncode=0, stdout=(install.__version__ + '\n').encode())):
+                result = cli.doctor(home)
+
+        self.assertEqual(result['status'], 'READY_FALLBACK')
+        which.assert_called_once_with('codex')
+        capabilities.assert_called_once_with(home, '/normal/PATH/codex')
+        self.assertFalse(marker.exists())
+
+    def test_resolve_codex_preserves_explicit_path_and_uses_path_by_default(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory).resolve() / 'home'
+            resource = home / install.RESOURCE
+            resource.mkdir(parents=True)
+            (resource / 'capabilities.json').write_text(
+                json.dumps({'schema': 2, 'codex': '/untrusted/from/snapshot'}), encoding='utf-8')
+            with patch.object(cli.shutil, 'which', side_effect=lambda value: {
+                    'codex': '/normal/PATH/codex', '/known/explicit/codex': '/known/explicit/codex'
+            }.get(value)) as which:
+                self.assertEqual(cli.resolve_codex(home), '/normal/PATH/codex')
+                self.assertEqual(cli.resolve_codex(home, '/known/explicit/codex'),
+                                 '/known/explicit/codex')
+        self.assertEqual([call.args[0] for call in which.call_args_list],
+                         ['codex', '/known/explicit/codex'])
+
     def test_invalid_safety_flags_reject_before_side_effects(self):
         cases = [
             (['verify', '--live', '--dry-run'], '--dry-run'),
@@ -28,6 +74,8 @@ class CLITests(unittest.TestCase):
             (['process-init', '--project', '.', '--summary'], '--summary'),
             (['process-check', '--project', '.', '--run-id', 'a' * 32, '--summary'], '--summary'),
             (['doctor', '--summary'], 'process options'),
+            (['refresh', '--root-model', 'gpt-6.1-sol'], 'only valid for select or verify'),
+            (['select', '--root-effort', 'high'], 'only valid for verify'),
             (['internal-smoke-check', '--project', '.', '--dry-run'], '--dry-run'),
             (['recover', '--backup', 'recorded', '--yes'], '--backup'),
             (['install', '--backup', 'recorded', '--yes'], '--backup'),
@@ -55,6 +103,25 @@ class CLITests(unittest.TestCase):
                     for mocked in mocks:
                         mocked.assert_not_called()
                     self.assertFalse(home.exists())
+
+    def test_select_uses_the_same_child_policy_for_missing_unknown_and_any_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory).resolve() / 'home'
+            identities = (None, 'unknown', 'gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-luna', 'future-model')
+            for identity in identities:
+                arguments = ['select', '--explain']
+                if identity is not None:
+                    arguments += ['--root-model', identity]
+                with self.subTest(identity=identity), patch.object(install, 'validate', return_value={'schema': 4}), \
+                        patch.object(policy, 'select', return_value={'status': 'fallback',
+                            'role': 'adaptive_luna_xhigh', 'effort': 'xhigh'}) as selector, \
+                        redirect_stdout(StringIO()) as output:
+                    rc = cli.main(['--codex-home', str(home), *arguments])
+                    result = json.loads(output.getvalue())
+                self.assertEqual(result['role'], 'adaptive_luna_xhigh')
+                self.assertEqual(rc, 0)
+                selector.assert_called_once()
+            self.assertFalse(home.exists())
 
     def test_recovery_and_explicit_rollback_dispatch(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -227,14 +294,15 @@ runpy.run_path(entry,run_name='__main__')
             original_select = policy.select
             fixed_now = now
 
-            def fixed_clock_select(selected_home, selected_project=None, *, force=False, now=None):
+            def fixed_clock_select(selected_home, selected_project=None, *, force=False, now=None, codex=None):
                 calls.append({
                     'home': str(selected_home),
                     'project': None if selected_project is None else str(selected_project),
                     'force': force,
+                    'codex': codex,
                 })
                 return original_select(selected_home, selected_project, force=force,
-                                       now=now if now is not None else fixed_now)
+                                       now=now if now is not None else fixed_now, codex=codex)
 
             output = StringIO()
             with patch.dict(os.environ, {'TZ': 'UTC'}, clear=False), \
@@ -257,6 +325,7 @@ runpy.run_path(entry,run_name='__main__')
                 'home': str(home),
                 'project': str(project),
                 'force': True,
+                'codex': str(fake_codex),
             }])
             self.assertFalse((home / policy.RESOURCE / 'state/policy-cache.json').exists())
             self.assertEqual(other_cache.read_bytes(), other_before)

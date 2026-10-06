@@ -1,15 +1,14 @@
 {
-  "captured_on": "2026-09-23",
-  "platform": "macOS arm64",
-  "cli_version": "codex-cli 0.155.1",
-  "scope": "Actual installed-entry checks; no model task started",
-  "doctor_excerpt": {
-    "version": "0.7.0",
-    "status": "READY_FALLBACK",
-    "managed_files_and_config": "PASS",
-    "capabilities": "READY",
-    "live_verified": false
-  },
-  "select_output": "adaptive_luna_xhigh",
-  "commands_shown": "Equivalent source entry commands; capture used the installed entry with explicit Codex home. Private paths omitted."
+  "captured_on": "2026-09-30",
+  "platform": "Darwin arm64",
+  "python_version": "3.14.6",
+  "package_version": "0.8.0",
+  "scope": "Actual installed 0.8.0 source CLI after a temporary isolated install and synthetic local Luna fallback-cache setup; no network or model task",
+  "command": "select --project <temporary-project> --explain",
+  "exit_code": 0,
+  "status": "fallback",
+  "role": "adaptive_luna_xhigh",
+  "effort": "xhigh",
+  "refreshed": false,
+  "evidence_kind": "selected fields from the captured CLI JSON"
 }

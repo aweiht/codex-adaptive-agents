@@ -15,36 +15,23 @@ from . import __version__, install
 from .platform import atomic, clean_env, encode, finish, loads, read, run as run_process, safe, spawn, stop
 
 
-_PUBLIC_EFFECTIVE_KEYS = ('model', 'modelProvider', 'provider', 'reasoningEffort', 'reasoning_effort')
-
-
-def _safe_public_effective(value):
-    if not isinstance(value, dict):
-        return {}
-    result = {}
-    for key in _PUBLIC_EFFECTIVE_KEYS:
-        item = value.get(key)
-        if isinstance(item, (str, int, float, bool)) or (item is None and key in value):
-            result[key] = item
-    return result
-
-
 def metadata(thread):
-    result = {k: thread[k] for k in ('id', 'parentThreadId', 'agentRole') if k in thread}
-    status = thread.get('status', {})
-    result['status'] = {'type': status.get('type') if isinstance(status, dict) else status}
-    source = thread.get('source', {})
-    child = source.get('subagent', source.get('subAgent', {})) if isinstance(source, dict) else {}
-    birth = thread.get('spawn') or (child.get('thread_spawn') if isinstance(child, dict) else None)
-    if isinstance(birth, dict):
-        result['spawn'] = {k: birth.get(k) for k in ('parent_thread_id', 'agent_role', 'depth')}
-    for key, value in _safe_public_effective(thread).items():
-        result[key] = value
-    for name in ('effective', 'requested'):
-        values = _safe_public_effective(thread.get(name))
-        if values:
-            result[name] = values
-    return result
+    # Share the verifier's canonical public projection.  The fixed invalid
+    # marker preserves malformed known fields without retaining their values.
+    from . import verify
+    return verify.normalize_public_thread_metadata(thread)
+
+
+def thread_start_request(project, root_model=None, root_effort=None):
+    """Build thread/start parameters without inventing root defaults."""
+    request={'cwd':str(project),'ephemeral':True,'modelProvider':'openai',
+        'sandbox':'workspace-write','approvalPolicy':'never','allowProviderModelFallback':False,
+        'experimentalRawEvents':False,'config':{'agents.enabled':True}}
+    if root_model is not None:
+        request['model']=root_model
+    if root_effort is not None:
+        request['config']['model_reasoning_effort']=root_effort
+    return request
 
 
 class Session:
@@ -170,10 +157,11 @@ class Session:
                 value['status'] = {'type': status.get('type')} if isinstance(status, dict) else status
             if isinstance(params.get('turn'), dict):
                 turn = params['turn']
-                value['turn'] = {k: turn.get(k) for k in ('id', 'status')}
+                value['turn'] = {k: turn[k] for k in ('id', 'status') if k in turn}
                 if method == 'turn/completed' and tid == self.root:
                     self.completed = True
-                    if turn.get('status') != 'completed':
+                    from . import verify
+                    if verify._turn_status(value) != 'completed':
                         raise RuntimeError('root turn failed')
             self.keep(value)
         elif method in ('item/started', 'item/completed'):
@@ -234,20 +222,24 @@ def hashes(project):
     return {name: install.sha(read(project / name)) for name in sorted(wanted)}
 
 
-def run(home, codex, project, output, role):
+def run(home, codex, project, output, role=None, *, root_model=None, root_effort=None, select_role=None):
     from . import verify
     home, project, output = (Path(x) for x in (home, project, output))
     entry = Path(__file__).resolve().parents[1] / 'codex-adaptive-agents.py'
     result = dict(status='LIVE_FAILED', version=__version__, project=str(project), evidence=str(output),
                   server_reported_model='unknown', internal_session_or_auth_files_read=False,
                   turn_history_requested=False, test_transport='official transient stdio; no daemon or TCP listener')
+    result['root_requested']={'model':root_model,'reasoningEffort':root_effort,
+                              'modelProvider':'openai','allowProviderModelFallback':False}
     started = time.monotonic()
     deadline = started + 600
     session = None
     prepared = False
     try:
-        if role not in ('adaptive_luna_' + e for e in install.EFFORTS):
+        if role is not None and role not in ('adaptive_luna_' + e for e in install.EFFORTS):
             raise RuntimeError('unsupported role')
+        if root_effort is not None and (not isinstance(root_effort,str) or not root_effort.strip()):
+            raise RuntimeError('requested root effort must be nonempty')
         if contains(project, output) or contains(output, project) or contains(project, entry):
             raise RuntimeError('project, evidence and trusted code must be separate')
         for path in (project/'AGENTS.md', output/'result.json', entry):
@@ -286,14 +278,36 @@ def run(home, codex, project, output, role):
         session=Session(codex,project,env,config,deadline)
         session.call('initialize',{'clientInfo':{'name':'codex_adaptive_agents_verify','version':__version__},'capabilities':{'experimentalApi':True}})
         session.send({'method':'initialized','params':{}})
-        root=session.call('thread/start',{'cwd':str(project),'ephemeral':True,'model':'gpt-6-astra','modelProvider':'openai',
-             'sandbox':'workspace-write','approvalPolicy':'never','allowProviderModelFallback':False,'experimentalRawEvents':False,
-             'config':{'agents.enabled':True,'model_reasoning_effort':'max'}})
+        thread_request=thread_start_request(project,root_model,root_effort)
+        root=session.call('thread/start',thread_request)
         session.root=(root.get('thread') or {}).get('id','')
-        effective={k:root.get(k) for k in ('model','modelProvider','reasoningEffort')}
+        effective={k:root[k] for k in ('model','modelProvider','provider','reasoningEffort','reasoning_effort') if k in root}
+        effective, shape_errors = verify._normalize_effective(effective, 'root client effective metadata')
+        if shape_errors:
+            raise RuntimeError(shape_errors[0])
+        requested=result['root_requested']
+        session.keep(dict(event='root/client-requested',threadId=session.root,metadata=requested))
         session.keep(dict(event='root/client-effective',threadId=session.root,metadata=effective))
-        if not session.root or effective!={'model':'gpt-6-astra','modelProvider':'openai','reasoningEffort':'max'}:
-            raise RuntimeError('root client model/provider/effort mismatch')
+        if not session.root:
+            raise RuntimeError('root thread/start returned no thread id')
+        providers=[effective[key] for key in ('modelProvider','provider') if key in effective and effective[key] is not None]
+        if not providers or any(provider != 'openai' for provider in providers):
+            raise RuntimeError('root client provider is not openai')
+        effective_model=effective.get('model')
+        effective_effort=effective.get('reasoningEffort', effective.get('reasoning_effort'))
+        if root_model is not None and effective_model != root_model:
+            raise RuntimeError('root client effective model differs from requested model')
+        if root_effort is not None and effective_effort != root_effort:
+            raise RuntimeError('root client effective effort differs from requested effort')
+        if role is None:
+            if not callable(select_role):
+                raise RuntimeError('child role selector unavailable')
+            selection=select_role()
+            if isinstance(selection,dict):
+                raise RuntimeError('child role selection unavailable')
+            role=selection
+        if role not in ('adaptive_luna_' + e for e in install.EFFORTS):
+            raise RuntimeError('child role selection unavailable')
         prompt=('Follow contract.md. Spawn exactly two direct native leaf subagents concurrently using agent_type '+role+
             '. You must not implement the functions yourself. One child owns only '+str(project/'normalize_tags.py')+
             ' and the other owns only '+str(project/'unique_numbers.py')+'. Give both the full contract, exact file ownership and absolute cwd '+str(project)+
@@ -302,6 +316,7 @@ def run(home, codex, project, output, role):
             'AGENTS.md and contract.md are immutable. The selector already selected '+role+'; do not rerun it. '+
             'Wait until both children complete and stop writing. The external verifier runs independent tests after your final reply. '+
             'Do not add reports or caches. This explicitly authorizes two real native Luna tasks.')
+        print('Starting two native Luna tasks (up to 600 seconds); this uses Codex allowance.', file=sys.stderr)
         session.call('turn/start',{'threadId':session.root,'input':[{'type':'text','text':prompt}]})
         while not session.completed:
             session.receive()
@@ -313,7 +328,8 @@ def run(home, codex, project, output, role):
             session.keep(dict(event='public-request',method='thread/read',params=params))
             value=session.call('thread/read',params)
             session.keep(dict(event='child/public-metadata',thread=metadata(value.get('thread') or {})))
-        checks=verify.validate_public_events(session.events,role)
+        checks=verify.validate_public_events(session.events,role,
+                    requested_root_model=root_model,requested_root_effort=root_effort)
         result['verification']=checks
         if checks.get('ok') is not True:
             raise RuntimeError('public lifecycle validation failed')

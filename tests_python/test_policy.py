@@ -1,8 +1,10 @@
 """Offline policy tests for native capability and daily-cache boundaries."""
 from datetime import datetime, timedelta, timezone
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 import time
 import unittest
@@ -29,7 +31,7 @@ class PolicyTests(unittest.TestCase):
         self.project.mkdir()
         self.now = datetime(2026, 9, 15, 12, 0, tzinfo=UTC)
 
-    def snapshot(self, checked_at, *, codex=None, efforts=None):
+    def snapshot(self, checked_at, *, codex=None, efforts=None, root_model="gpt-6-astra"):
         codex = codex or str(self.home / 'codex')
         resource = self.home / policy.RESOURCE
         resource.mkdir(exist_ok=True)
@@ -37,7 +39,7 @@ class PolicyTests(unittest.TestCase):
             "schema": 1,
             "checked_at": checked_at.isoformat().replace("+00:00", "Z"),
             "supported_efforts": efforts or EFFORTS,
-            "root_model": "gpt-6-astra",
+            "root_model": root_model,
             "child_model": "gpt-6-luna",
             "codex": codex,
             "cli_version": "codex-cli 0.147.0",
@@ -94,6 +96,46 @@ class PolicyTests(unittest.TestCase):
                 b'"source_updated_at":"not-a-time","points":[]}'
             )
 
+    def test_compatibility_selector_ignores_missing_unknown_and_any_root_model(self):
+        identities = (None, "unknown", "gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna", "future-model")
+        with patch.object(policy, "select", return_value={"role": "adaptive_luna_xhigh"}) as selector:
+            for root_model in identities:
+                with self.subTest(root_model=root_model):
+                    self.assertEqual(policy.select_for_root(self.home, self.project, root_model)["role"],
+                                 "adaptive_luna_xhigh")
+        self.assertEqual(selector.call_count, len(identities))
+        self.assertTrue(all(call.args == (self.home, self.project) for call in selector.call_args_list))
+
+    def test_installed_model_policy_file_has_no_root_allowlist(self):
+        path = Path(policy.__file__).with_name("model_policy.json")
+        value = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(value, {"schema": 1, "delegation_root_policy": "unrestricted"})
+        self.assertNotIn("supported_root_models", value)
+
+    def test_child_only_catalogue_and_new_snapshot_need_no_astra_entry(self):
+        raw = json.dumps({"models": [{"slug": "gpt-6-luna",
+            "supported_reasoning_levels": [{"effort": effort} for effort in EFFORTS]}]}).encode()
+        self.assertEqual(policy._catalog_efforts(raw, require_full=True), EFFORTS)
+
+        from types import SimpleNamespace
+        def codex_result(_home, argv, **_kwargs):
+            output = b"codex-cli 0.155.1" if argv[-1] == "--version" else raw
+            return SimpleNamespace(returncode=0, stdout=output)
+        with patch.object(policy, "_run_codex", side_effect=codex_result):
+            snapshot = policy.preflight(self.home, str(self.home / "codex"), now=self.now)
+        self.assertEqual(snapshot["schema"], 2)
+        self.assertEqual(snapshot["child_model"], "gpt-6-luna")
+        self.assertNotIn("root_model", snapshot)
+
+    def test_legacy_schema_one_snapshot_treats_root_identity_as_provenance(self):
+        for root_model in ("gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna", "unknown-future-model"):
+            with self.subTest(root_model=root_model):
+                self.snapshot(self.now, root_model=root_model)
+                snapshot = policy.read_capabilities(self.home, now=self.now)
+                self.assertEqual(snapshot["schema"], 2)
+                self.assertEqual(snapshot["supported_efforts"], EFFORTS)
+                self.assertNotIn("root_model", snapshot)
+
     def test_same_local_day_reuses_cache_without_refresh(self):
         calls = {"catalog": 0, "sources": 0}
 
@@ -117,6 +159,256 @@ class PolicyTests(unittest.TestCase):
         self.assertTrue(first["refreshed"])
         self.assertFalse(second["refreshed"])
         self.assertEqual(calls, {"catalog": 1, "sources": 1})
+
+    def test_normal_evidence_cache_is_reusable_offline(self):
+        def measurement(source, batch):
+            return {
+                "source": source, "url": "https://example.invalid/public-fixture",
+                "fetched_at": policy._stamp(self.now), "evaluated_at": policy._stamp(self.now),
+                "batch": batch, "model": "gpt-6-luna", "effort": "max",
+                "category": "backend", "protocol": "fixture-v1", "grader": "fixture-grader",
+                "dataset_version": "fixture-pack", "route": policy.RUNTIME_ROUTE,
+                "score": 90, "score_max": 100, "duration_ms": None,
+                "duration_metric": "", "samples": None, "published_rank": 1,
+                "critical_failure": False, "content_hash": "fixture-sha256",
+            }
+
+        sources = [
+            {"source": name, "status": "ok", "batch": name + "-batch",
+             "rows": [measurement(name, name + "-batch")]}
+            for name in ("modeldial", "deng")
+        ]
+        with patch.dict(os.environ, {"TZ": "UTC"}, clear=False), \
+                patch.object(policy, "DirectSupportedEfforts", return_value=list(EFFORTS)), \
+                patch.object(policy, "FetchSources", return_value=sources):
+            selected = policy.select(self.home, self.project, now=self.now)
+            cached = policy.read_cached(self.home, self.project, now=self.now)
+
+        self.assertEqual(selected["status"], "valid")
+        self.assertEqual(selected["role"], "adaptive_luna_max")
+        self.assertEqual(cached["status"], "valid")
+        self.assertEqual(cached["role"], "adaptive_luna_max")
+
+        with patch.dict(os.environ, {"TZ": "UTC"}, clear=False), \
+                patch.object(policy, "DirectSupportedEfforts", return_value=list(EFFORTS)), \
+                patch.object(policy, "FetchSources", return_value=[]):
+            preserved = policy.select(self.home, self.project, force=True,
+                                       now=self.now + timedelta(hours=1))
+        self.assertEqual(preserved["status"], "degraded")
+        self.assertEqual(preserved["role"], "adaptive_luna_max")
+
+    def test_explicit_force_repairs_invalid_cache_but_normal_select_preserves_it(self):
+        cache_path = self.project / ".codex-adaptive-agents/state/policy-cache.json"
+        cache_path.parent.mkdir(parents=True)
+        malformed = b'{"schema":true,"policy":{}}\n'
+        cache_path.write_bytes(malformed)
+
+        with patch.dict(os.environ, {"TZ": "UTC"}, clear=False), \
+                patch.object(policy, "DirectSupportedEfforts",
+                             side_effect=AssertionError("normal select must not repair invalid cache")), \
+                patch.object(policy, "FetchSources",
+                             side_effect=AssertionError("normal select must not fetch")):
+            blocked = policy.select(self.home, self.project, now=self.now)
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(blocked["role"], "")
+        self.assertEqual(cache_path.read_bytes(), malformed)
+
+        with patch.dict(os.environ, {"TZ": "UTC"}, clear=False), \
+                patch.object(policy, "DirectSupportedEfforts", return_value=list(EFFORTS)), \
+                patch.object(policy, "FetchSources", return_value=[]):
+            repaired = policy.select(self.home, self.project, force=True, now=self.now)
+        self.assertEqual(repaired["status"], "fallback")
+        self.assertEqual(repaired["role"], "adaptive_luna_xhigh")
+        restored = policy._cache(cache_path)
+        self.assertEqual(restored["schema"], 1)
+        self.assertEqual(restored["attempted_days"]["UTC:2026-09-15"], policy._stamp(self.now))
+
+    def test_strict_json_normalizes_python_oversized_integer_error(self):
+        digit_limit = sys.get_int_max_str_digits()
+        if digit_limit == 0:
+            self.skipTest("Python integer conversion limit is disabled")
+        digits = max(5000, digit_limit + 1)
+        raw = (b'{"schema":1,"attempted_days":{"UTC:2026-09-15":' +
+               b"9" * digits + b"}}\n")
+        self.assertLess(len(raw), policy.MAX_CACHE_BYTES)
+        with self.assertRaisesRegex(policy.PolicyError, "invalid JSON"):
+            policy._strict_json(raw)
+        self.assertEqual(sys.get_int_max_str_digits(), digit_limit)
+
+    def test_oversized_integer_cache_blocks_unchanged_and_force_repairs_under_lock(self):
+        digit_limit = sys.get_int_max_str_digits()
+        if digit_limit == 0:
+            self.skipTest("Python integer conversion limit is disabled")
+        digits = max(5000, digit_limit + 1)
+        malformed = (b'{"schema":1,"attempted_days":{"UTC:2026-09-15":' +
+                     b"9" * digits + b"}}\n")
+        self.assertLess(len(malformed), policy.MAX_CACHE_BYTES)
+        cache_path = self.project / ".codex-adaptive-agents/state/policy-cache.json"
+        cache_path.parent.mkdir(parents=True)
+        cache_path.write_bytes(malformed)
+
+        entered_locks = []
+        real_file_lock = policy._platform.file_lock
+
+        @contextmanager
+        def tracked_file_lock(path, timeout=5):
+            with real_file_lock(path, timeout=timeout):
+                entered_locks.append(Path(path))
+                yield
+
+        with patch.dict(os.environ, {"TZ": "UTC"}, clear=False), \
+                patch.object(policy, "DirectSupportedEfforts",
+                             side_effect=AssertionError("blocked select must not probe")), \
+                patch.object(policy, "FetchSources",
+                             side_effect=AssertionError("blocked select must not fetch")):
+            blocked = policy.select(self.home, self.project, now=self.now)
+            cached = policy.read_cached(self.home, self.project, now=self.now)
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(cached["status"], "blocked")
+        self.assertEqual(cache_path.read_bytes(), malformed)
+        self.assertEqual(entered_locks, [])
+
+        with patch.dict(os.environ, {"TZ": "UTC"}, clear=False), \
+                patch.object(policy._platform, "file_lock", side_effect=tracked_file_lock), \
+                patch.object(policy, "DirectSupportedEfforts", return_value=list(EFFORTS)), \
+                patch.object(policy, "FetchSources", return_value=[]):
+            repaired = policy.select(self.home, self.project, force=True, now=self.now)
+        self.assertEqual(repaired["status"], "fallback")
+        self.assertEqual(repaired["role"], "adaptive_luna_xhigh")
+        self.assertEqual(entered_locks, [self.project / ".codex-adaptive-agents/state/policy-refresh.lock"])
+        self.assertNotEqual(cache_path.read_bytes(), malformed)
+        restored = policy._cache(cache_path)
+        self.assertEqual(restored["schema"], 1)
+        self.assertEqual(restored["attempted_days"]["UTC:2026-09-15"], policy._stamp(self.now))
+
+    def test_force_refresh_does_not_rehash_bad_previous_version_or_sources(self):
+        def measurement(source, batch):
+            return {
+                "source": source, "url": "https://example.invalid/previous-fixture",
+                "fetched_at": policy._stamp(self.now), "evaluated_at": policy._stamp(self.now),
+                "batch": batch, "model": "gpt-6-luna", "effort": "max",
+                "category": "backend", "protocol": "fixture-v1", "grader": "fixture-grader",
+                "dataset_version": "fixture-pack", "route": policy.RUNTIME_ROUTE,
+                "score": 90, "score_max": 100, "duration_ms": None,
+                "duration_metric": "", "samples": None, "published_rank": 1,
+                "critical_failure": False, "content_hash": "fixture-sha256",
+            }
+
+        sources = [
+            {"source": name, "status": "ok", "batch": name + "-batch",
+             "rows": [measurement(name, name + "-batch")]}
+            for name in ("modeldial", "deng")
+        ]
+        with patch.dict(os.environ, {"TZ": "UTC"}, clear=False), \
+                patch.object(policy, "DirectSupportedEfforts", return_value=list(EFFORTS)), \
+                patch.object(policy, "FetchSources", return_value=sources):
+            initial = policy.select(self.home, self.project, now=self.now)
+        self.assertEqual(initial["status"], "valid")
+        self.assertEqual(initial["role"], "adaptive_luna_max")
+
+        cache_path = self.project / ".codex-adaptive-agents/state/policy-cache.json"
+        pristine = json.loads(cache_path.read_text(encoding="utf-8"))
+        attacks = {
+            "bad version": lambda value: value["policy"].update(version="policy-v1-bad"),
+            "sources no longer bind evidence": lambda value: value["policy"].update(sources=[]),
+        }
+        for label, mutate in attacks.items():
+            with self.subTest(attack=label):
+                value = json.loads(json.dumps(pristine))
+                mutate(value)
+                if label == "sources no longer bind evidence":
+                    decision_config = dict(policy._cfg())
+                    decision_config["supported_efforts"] = list(value["supported_efforts"])
+                    value["policy"]["version"] = policy._decision_version(
+                        decision_config, value["policy"])
+                cache_path.write_text(json.dumps(value), encoding="utf-8")
+                with patch.dict(os.environ, {"TZ": "UTC"}, clear=False), \
+                        patch.object(policy, "DirectSupportedEfforts", return_value=list(EFFORTS)), \
+                        patch.object(policy, "FetchSources", return_value=[]):
+                    result = policy.select(self.home, self.project, force=True,
+                                           now=self.now + timedelta(hours=1))
+                self.assertEqual(result["status"], "fallback")
+                self.assertEqual(result["role"], "adaptive_luna_xhigh")
+                saved = json.loads(cache_path.read_text(encoding="utf-8"))
+                self.assertEqual(saved["policy"]["selected_evidence"], [])
+
+    def test_cache_rejects_boolean_schema_and_inconsistent_decisions(self):
+        with patch.dict(os.environ, {"TZ": "UTC"}, clear=False), \
+                patch.object(policy, "DirectSupportedEfforts", return_value=list(EFFORTS)), \
+                patch.object(policy, "FetchSources", return_value=[]):
+            produced = policy.select(self.home, self.project, now=self.now)
+            self.assertEqual(produced["role"], "adaptive_luna_xhigh")
+            self.assertEqual(produced["status"], "fallback")
+            self.assertEqual(policy.read_cached(self.home, self.project, now=self.now)["role"],
+                             "adaptive_luna_xhigh")
+
+        cache_path = self.project / ".codex-adaptive-agents/state/policy-cache.json"
+        original = json.loads(cache_path.read_text(encoding="utf-8"))
+        cases = {
+            "boolean schema": lambda value: value.update(schema=True),
+            "unbacked valid status": lambda value: value["policy"].update(status="valid"),
+            "wrong route": lambda value: value["policy"].update(runtime_route="other-route"),
+            "wrong version": lambda value: value["policy"].update(version="policy-v1-" + "0" * 24),
+            "malformed timestamp": lambda value: value.update(capabilities_at="not-a-time"),
+            "wrong reasons shape": lambda value: value["policy"].update(reasons=123),
+        }
+        for label, mutate in cases.items():
+            with self.subTest(case=label):
+                value = json.loads(json.dumps(original))
+                mutate(value)
+                cache_path.write_text(json.dumps(value), encoding="utf-8")
+                result = policy.read_cached(self.home, self.project, now=self.now)
+                self.assertEqual(result["role"], "")
+                self.assertEqual(result["effort"], "")
+                self.assertEqual(result["status"], "blocked")
+        cache_path.write_text(json.dumps(original), encoding="utf-8")
+
+        boolean_schema = json.loads(json.dumps(original))
+        boolean_schema["schema"] = True
+        cache_path.write_text(json.dumps(boolean_schema), encoding="utf-8")
+        with patch.dict(os.environ, {"TZ": "UTC"}, clear=False), \
+                patch.object(policy, "DirectSupportedEfforts",
+                             side_effect=AssertionError("invalid cache must not reset daily budget")), \
+                patch.object(policy, "FetchSources",
+                             side_effect=AssertionError("invalid cache must not fetch")):
+            selected = policy.select(self.home, self.project, now=self.now)
+        self.assertEqual(selected["role"], "")
+        self.assertEqual(selected["effort"], "")
+        self.assertEqual(selected["status"], "blocked")
+
+        broken_time = json.loads(json.dumps(original))
+        broken_time["capabilities_at"] = "not-a-time"
+        cache_path.write_text(json.dumps(broken_time), encoding="utf-8")
+        with patch.dict(os.environ, {"TZ": "UTC"}, clear=False), \
+                patch.object(policy, "DirectSupportedEfforts",
+                             side_effect=AssertionError("same-day unusable cache must not refresh")), \
+                patch.object(policy, "FetchSources",
+                             side_effect=AssertionError("same-day unusable cache must not fetch")):
+            selected = policy.select(self.home, self.project, now=self.now)
+        self.assertEqual(selected["role"], "")
+        self.assertEqual(selected["effort"], "")
+        self.assertEqual(selected["status"], "blocked")
+
+    def test_snapshot_cli_path_is_not_passed_to_selector_as_execution_authority(self):
+        marker = self.home / "should-not-run"
+        fake = self.home / "codex-from-snapshot"
+        fake.write_text("#!/bin/sh\ntouch " + str(marker) + "\n", encoding="utf-8")
+        fake.chmod(0o755)
+        self.snapshot(self.now, codex=str(fake))
+        observed = []
+
+        def catalog(_home, codex):
+            observed.append(codex)
+            return list(EFFORTS)
+
+        with patch.dict(os.environ, {"TZ": "UTC"}, clear=False), \
+                patch.object(policy, "DirectSupportedEfforts", side_effect=catalog), \
+                patch.object(policy, "FetchSources", return_value=[]):
+            result = policy.select(self.home, self.project, now=self.now)
+
+        self.assertEqual(result["role"], "adaptive_luna_xhigh")
+        self.assertEqual(observed, ["codex"])
+        self.assertFalse(marker.exists())
 
     def test_system_timezone_controls_natural_day(self):
         with patch.dict(os.environ, {"TZ": "Asia/Shanghai"}, clear=False), \
@@ -162,7 +454,7 @@ class PolicyTests(unittest.TestCase):
             result = policy.select(self.home, self.project, now=self.now)
 
         self.assertEqual(result["role"], "adaptive_luna_xhigh")
-        self.assertEqual(seen, [(self.home, str(self.home / 'codex'))])
+        self.assertEqual(seen, [(self.home, "codex")])
         self.assertEqual(result["capabilities_at"], policy._stamp(self.now))
         self.assertEqual(path.read_bytes(), original)
 

@@ -1,18 +1,14 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="710" viewBox="0 0 1500 710">
-<rect width="1500" height="710" rx="24" fill="#101b25"/>
-<text x="54" y="67" fill="#ffffff" font-family="sans-serif" font-size="32" font-weight="700">Codex Adaptive Agents 0.7.0</text>
-<text x="54" y="110" fill="#b7c6d0" font-family="sans-serif" font-size="22">Actual local command output · No model tasks started</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="590" viewBox="0 0 1500 590">
+<rect width="1500" height="590" rx="24" fill="#101b25"/>
 <path d="M54 139 H1446" stroke="#374957"/>
-<text x="54" y="190" fill="#00ffcc" font-family="monospace" font-size="22" xml:space="preserve">$ python3 codex-adaptive-agents.py doctor</text>
-<text x="54" y="224" fill="#edf3f7" font-family="monospace" font-size="22" xml:space="preserve">{</text>
-<text x="54" y="258" fill="#edf3f7" font-family="monospace" font-size="22" xml:space="preserve">  &quot;version&quot;: &quot;0.7.0&quot;,</text>
-<text x="54" y="292" fill="#edf3f7" font-family="monospace" font-size="22" xml:space="preserve">  &quot;status&quot;: &quot;READY_FALLBACK&quot;,</text>
-<text x="54" y="326" fill="#edf3f7" font-family="monospace" font-size="22" xml:space="preserve">  &quot;managed_files_and_config&quot;: &quot;PASS&quot;,</text>
-<text x="54" y="360" fill="#edf3f7" font-family="monospace" font-size="22" xml:space="preserve">  &quot;capabilities&quot;: &quot;READY&quot;,</text>
-<text x="54" y="394" fill="#edf3f7" font-family="monospace" font-size="22" xml:space="preserve">  &quot;live_verified&quot;: false</text>
-<text x="54" y="428" fill="#edf3f7" font-family="monospace" font-size="22" xml:space="preserve">}</text>
-<text x="54" y="462" fill="#edf3f7" font-family="monospace" font-size="22" xml:space="preserve"></text>
-<text x="54" y="496" fill="#00ffcc" font-family="monospace" font-size="22" xml:space="preserve">$ python3 codex-adaptive-agents.py select --project .</text>
-<text x="54" y="530" fill="#00ffcc" font-family="monospace" font-size="22" xml:space="preserve">adaptive_luna_xhigh</text>
-<text x="54" y="660" fill="#b7c6d0" font-family="sans-serif" font-size="20">2026-09-23 · macOS arm64 · Private paths omitted · Readiness is not live delegation</text>
+<text x="54" y="67" fill="#ffffff" font-family="sans-serif" font-size="32" font-weight="700">Codex Adaptive Agents 0.8.0</text>
+<text x="54" y="110" fill="#b7c6d0" font-family="sans-serif" font-size="22">Root-independent selection · Luna child policy only</text>
+<text x="54" y="195" fill="#00ffcc" font-family="monospace" font-size="22">$ python3 codex-adaptive-agents.py select --project &lt;temporary-project&gt; --explain</text>
+<text x="54" y="235" fill="#edf3f7" font-family="monospace" font-size="22">{</text>
+<text x="54" y="274" fill="#edf3f7" font-family="monospace" font-size="22">  &quot;status&quot;: &quot;fallback&quot;,</text>
+<text x="54" y="313" fill="#edf3f7" font-family="monospace" font-size="22">  &quot;role&quot;: &quot;adaptive_luna_xhigh&quot;,</text>
+<text x="54" y="352" fill="#edf3f7" font-family="monospace" font-size="22">  &quot;effort&quot;: &quot;xhigh&quot;,</text>
+<text x="54" y="391" fill="#edf3f7" font-family="monospace" font-size="22">  &quot;refreshed&quot;: false</text>
+<text x="54" y="430" fill="#edf3f7" font-family="monospace" font-size="22">}</text>
+<text x="54" y="520" fill="#b7c6d0" font-family="sans-serif" font-size="19">2026-09-30 · Actual isolated source CLI · Synthetic child cache · No network or model task</text>
 </svg>

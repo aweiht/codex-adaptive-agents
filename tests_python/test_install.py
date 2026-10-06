@@ -5,6 +5,7 @@ import shutil
 import tempfile
 import tomllib
 import unittest
+from contextlib import contextmanager
 from unittest.mock import patch
 
 from codex_adaptive_agents import install as i
@@ -12,6 +13,16 @@ from codex_adaptive_agents.platform import encode, read
 
 
 class InstallTests(unittest.TestCase):
+    @contextmanager
+    def legacy_install(self):
+        with patch.multiple(i, __version__='0.6.0', RUNTIME_FILES=i.LEGACY_RUNTIME_FILES):
+            yield
+
+    @contextmanager
+    def previous_07_install(self, runtime_files):
+        with patch.multiple(i, __version__='0.7.0', RUNTIME_FILES=runtime_files):
+            yield
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -77,7 +88,7 @@ class InstallTests(unittest.TestCase):
             b'model = "gpt-6-astra"\n[agents]\n'
             b'default_subagent_model = "gpt-5.6-luna"\nmax_threads = 5\n')
         (home / 'AGENTS.md').write_bytes(b'old instructions\n')
-        with patch.object(i, '__version__', '0.6.0'):
+        with self.legacy_install():
             _, _, plan = i.build(home)
             i.apply(home, plan['plan_id'])
         old_receipt = json.loads((home / i.RESOURCE / 'install-manifest.json').read_bytes())
@@ -85,13 +96,13 @@ class InstallTests(unittest.TestCase):
         self.assertNotIn('model', {row['key'] for row in old_receipt['config_changes']})
 
         future = dict(i.VERSION_PROFILES['0.6.0'])
-        with patch.dict(i.VERSION_PROFILES, {'0.7.0': future}), \
-                patch.object(i, '__version__', '0.7.0'):
+        with patch.dict(i.VERSION_PROFILES, {'0.8.0': future}), \
+                patch.object(i, '__version__', '0.8.0'):
             _, _, upgrade = i.build(home)
             self.assertEqual(upgrade['config_changes'], [])
             self.assertEqual(i.apply(home, upgrade['plan_id'])['status'], 'INSTALLED')
             receipt = i.validate(home)
-        self.assertEqual(receipt['version'], '0.7.0')
+        self.assertEqual(receipt['version'], '0.8.0')
         self.assertNotIn('model', {row['key'] for row in receipt['config_changes']})
 
     def test_v06_upgrade_preserves_root_preferences_and_uninstall(self):
@@ -107,7 +118,7 @@ class InstallTests(unittest.TestCase):
         (home / 'AGENTS.md').write_bytes(b'user instructions\n')
         current_role = i.role
         legacy_role = lambda effort: current_role(effort).replace(b'gpt-6-luna', b'gpt-5.6-luna')
-        with patch.object(i, '__version__', '0.6.0'), patch.object(i, 'role', side_effect=legacy_role):
+        with self.legacy_install(), patch.object(i, 'role', side_effect=legacy_role):
             _, _, plan = i.build(home)
             i.apply(home, plan['plan_id'])
             old_role = tomllib.loads((home / 'agents' / 'adaptive_luna_xhigh.toml').read_text())
@@ -129,7 +140,7 @@ class InstallTests(unittest.TestCase):
         self.assertNotIn('model_reasoning_effort', {row['key'] for row in upgrade['config_changes']})
         self.assertEqual(i.apply(home, upgrade['plan_id'])['status'], 'INSTALLED')
         upgraded = i.validate(home)
-        self.assertEqual(upgraded['version'], '0.7.0')
+        self.assertEqual(upgraded['version'], '0.8.0')
         self.assertNotIn('model', upgraded['managed_keys'])
         self.assertNotIn('model_reasoning_effort', upgraded['managed_keys'])
         self.assertNotIn('model', {row['key'] for row in upgraded['config_changes']})
@@ -160,27 +171,185 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(final['notify'], ['keep', 'user-added'])
         self.assertEqual(final['mcp_servers']['custom']['command'], 'keep')
 
+    def test_upgrade_and_exact_rollback_preserve_sol_and_nondefault_root_effort(self):
+        home = self.base / 'sol-root-preferences-home'
+        home.mkdir()
+        config_path = home / 'config.toml'
+        config_path.write_bytes(b'model = "gpt-6-astra"\nmodel_reasoning_effort = "max"\n')
+        with self.legacy_install():
+            _, _, legacy_plan = i.build(home)
+            i.apply(home, legacy_plan['plan_id'])
+
+        # Synthetic config-preservation fixture only; this does not claim the
+        # installed Codex client supports Sol/high.
+        # Preserve the installed child settings and change only the user's
+        # root-model preferences. Replacing the whole file would also erase
+        # managed keys and correctly fail the receipt integrity check.
+        configured = config_path.read_bytes()
+        configured = configured.replace(b'model = "gpt-6-astra"',
+                                        b'model = "gpt-6.1-sol"', 1)
+        configured = configured.replace(b'model_reasoning_effort = "max"',
+                                        b'model_reasoning_effort = "high"', 1)
+        config_path.write_bytes(configured)
+        before_upgrade = config_path.read_bytes()
+        _, _, upgrade = i.build(home)
+        upgraded = i.apply(home, upgrade['plan_id'])
+        current = tomllib.loads(config_path.read_text())
+        self.assertEqual((current['model'], current['model_reasoning_effort']),
+                         ('gpt-6.1-sol', 'high'))
+        self.assertEqual(i.validate(home)['version'], '0.8.0')
+        self.assertNotIn('model', i.validate(home)['managed_keys'])
+        self.assertNotIn('model_reasoning_effort', i.validate(home)['managed_keys'])
+        self.assertEqual(i.apply(home, i.build(home)[2]['plan_id'])['status'],
+                         'IDEMPOTENT_PASS')
+        self.assertEqual(i.recover(home, upgraded['backup'])['status'], 'ROLLBACK_EXACT_PASS')
+        self.assertEqual(config_path.read_bytes(), before_upgrade)
+        self.assertEqual(i.load(home)['version'], '0.6.0')
+        rolled_back = tomllib.loads(config_path.read_text())
+        self.assertEqual((rolled_back['model'], rolled_back['model_reasoning_effort']),
+                         ('gpt-6.1-sol', 'high'))
+        _, _, reapply = i.build(home)
+        i.apply(home, reapply['plan_id'])
+        _, _, uninstall = i.build(home, uninstall=True)
+        self.assertEqual(i.apply(home, uninstall['plan_id'], uninstall=True)['status'],
+                         'UNINSTALLED')
+        final = tomllib.loads(config_path.read_text())
+        self.assertEqual((final['model'], final['model_reasoning_effort']),
+                         ('gpt-6.1-sol', 'high'))
+
+    def test_legacy_runtime_receipt_layout_is_exact_and_upgrade_rolls_back(self):
+        # Structural compatibility fixture. The end-to-end release check also
+        # creates a receipt with the actual previous-Git installer source.
+        with self.previous_07_install(i.LEGACY_RUNTIME_FILES):
+            _, _, old_plan = i.build(self.home)
+            i.apply(self.home, old_plan['plan_id'])
+        manifest = self.home / i.RESOURCE / 'install-manifest.json'
+        legacy = json.loads(manifest.read_bytes())
+        model_policy = 'codex-adaptive-agents/runtime/codex_adaptive_agents/model_policy.json'
+        self.assertEqual(legacy['version'], '0.7.0')
+        self.assertNotIn(model_policy, legacy['owned_files'])
+        self.assertEqual(set(i.validate(self.home)['owned_files']), i.owned_paths() - {model_policy})
+
+        legacy_paths = set(legacy['owned_files'])
+        self.assertIn(frozenset(legacy_paths), i._receipt_owned_path_layouts('0.7.0'))
+        for label, mutate in (
+            ('missing legacy path', lambda owned: owned.pop(next(iter(owned)))),
+            ('extra legacy path', lambda owned: owned.__setitem__(
+                'codex-adaptive-agents/runtime/unknown.py', '0' * 64)),
+        ):
+            with self.subTest(label=label):
+                altered = dict(legacy, owned_files=dict(legacy['owned_files']))
+                mutate(altered['owned_files'])
+                manifest.write_bytes(encode(altered))
+                with self.assertRaisesRegex(ValueError, 'invalid receipt paths'):
+                    i.load(self.home)
+        manifest.write_bytes(encode(legacy))
+
+        _, _, plan = i.build(self.home)
+        upgraded = i.apply(self.home, plan['plan_id'])
+        self.assertEqual(i.validate(self.home)['version'], '0.8.0')
+        self.assertEqual(set(i.validate(self.home)['owned_files']), i.owned_paths())
+        self.assertTrue((self.home / model_policy).is_file())
+        self.assertEqual(i.recover(self.home, upgraded['backup'])['status'], 'ROLLBACK_EXACT_PASS')
+        restored = i.load(self.home)
+        self.assertEqual(restored['version'], '0.7.0')
+        self.assertEqual(set(restored['owned_files']), i.owned_paths() - {model_policy})
+        self.assertFalse((self.home / model_policy).exists())
+
+    def test_both_07_receipt_layouts_upgrade_idempotently_and_roll_back_exactly(self):
+        model_policy = 'codex-adaptive-agents/runtime/codex_adaptive_agents/model_policy.json'
+        layouts = (
+            ('legacy-16', i.LEGACY_RUNTIME_FILES),
+            ('current-17', i.RUNTIME_FILES),
+        )
+        for label, runtime_files in layouts:
+            with self.subTest(layout=label):
+                home = self.base / ('upgrade-' + label)
+                home.mkdir()
+                config_path = home / 'config.toml'
+                config_path.write_bytes(
+                    b'model = "gpt-6.1-sol"\nmodel_reasoning_effort = "high"\n'
+                    b'notify = ["preserve"]\n'
+                )
+                (home / 'AGENTS.md').write_bytes(b'user instructions\n')
+                with self.previous_07_install(runtime_files):
+                    _, _, old_plan = i.build(home)
+                    i.apply(home, old_plan['plan_id'])
+
+                old_receipt = i.validate(home)
+                self.assertEqual(old_receipt['version'], '0.7.0')
+                missing_policy = {model_policy} if runtime_files == i.LEGACY_RUNTIME_FILES else set()
+                self.assertEqual(set(old_receipt['owned_files']), i.owned_paths() - missing_policy)
+                managed = set(old_receipt['owned_files']) | {
+                    'config.toml', 'AGENTS.md', i.RESOURCE + '/install-manifest.json'
+                }
+                before = {name: (home / name).read_bytes() for name in sorted(managed)}
+
+                _, _, upgrade = i.build(home)
+                upgraded = i.apply(home, upgrade['plan_id'])
+                new_receipt = i.validate(home)
+                self.assertEqual(new_receipt['version'], '0.8.0')
+                self.assertEqual(set(new_receipt['owned_files']), i.owned_paths())
+                config = tomllib.loads(config_path.read_text())
+                self.assertEqual((config['model'], config['model_reasoning_effort']),
+                                 ('gpt-6.1-sol', 'high'))
+                self.assertEqual(config['notify'], ['preserve'])
+                self.assertEqual(i.apply(home, i.build(home)[2]['plan_id'])['status'],
+                                 'IDEMPOTENT_PASS')
+                self.assertEqual(i.recover(home, upgraded['backup'])['status'],
+                                 'ROLLBACK_EXACT_PASS')
+                self.assertEqual({name: (home / name).read_bytes() for name in sorted(managed)}, before)
+                self.assertEqual(i.load(home)['version'], '0.7.0')
+
+                _, _, reapply = i.build(home)
+                i.apply(home, reapply['plan_id'])
+                _, _, uninstall = i.build(home, uninstall=True)
+                self.assertEqual(i.apply(home, uninstall['plan_id'], uninstall=True)['status'],
+                                 'UNINSTALLED')
+                final_config = tomllib.loads(config_path.read_text())
+                self.assertEqual((final_config['model'], final_config['model_reasoning_effort']),
+                                 ('gpt-6.1-sol', 'high'))
+                self.assertEqual(final_config['notify'], ['preserve'])
+                self.assertTrue((home / 'AGENTS.md').read_text().startswith('user instructions'))
+
+    def test_receipt_owned_path_layout_rejects_missing_unknown_and_extra_entries(self):
+        self.apply()
+        manifest = self.home / i.RESOURCE / 'install-manifest.json'
+        original = json.loads(manifest.read_bytes())
+        for label, mutate in (
+            ('missing', lambda owned: owned.pop(next(iter(owned)))),
+            ('unknown', lambda owned: owned.__setitem__('codex-adaptive-agents/runtime/unknown.py', '0' * 64)),
+        ):
+            with self.subTest(label=label):
+                altered = dict(original, owned_files=dict(original['owned_files']))
+                mutate(altered['owned_files'])
+                manifest.write_bytes(encode(altered))
+                with self.assertRaisesRegex(ValueError, 'invalid receipt paths'):
+                    i.load(self.home)
+        manifest.write_bytes(encode(original))
+
     def test_new_install_preserves_existing_root_preferences(self):
-        config = b'model = "gpt-6-astra"\nmodel_reasoning_effort = "xhigh"\n[agents.implementer]\nmodel = "custom-role"\n'
+        # Synthetic config-preservation fixture only; not a client support claim.
+        config = b'model = "gpt-6.1-sol"\nmodel_reasoning_effort = "high"\n[agents.implementer]\nmodel = "custom-role"\n'
         (self.home / 'config.toml').write_bytes(config)
         _, _, plan = i.build(self.home)
         self.assertNotIn('model', {row['key'] for row in plan['config_changes']})
         self.assertNotIn('model_reasoning_effort', {row['key'] for row in plan['config_changes']})
         i.apply(self.home, plan['plan_id'])
         result = tomllib.loads((self.home / 'config.toml').read_text())
-        self.assertEqual(result['model'], 'gpt-6-astra')
-        self.assertEqual(result['model_reasoning_effort'], 'xhigh')
+        self.assertEqual(result['model'], 'gpt-6.1-sol')
+        self.assertEqual(result['model_reasoning_effort'], 'high')
         self.assertEqual(result['agents']['implementer']['model'], 'custom-role')
         role = tomllib.loads((self.home / 'agents' / 'adaptive_luna_xhigh.toml').read_text())
         self.assertEqual(role['model'], 'gpt-6-luna')
         self.assertEqual(role['model_reasoning_effort'], 'xhigh')
 
     def test_unknown_illegal_version_and_downgrade_refuse(self):
-        with patch.object(i, '__version__', '0.6.0'):
+        with self.legacy_install():
             self.apply()
         manifest = self.home / i.RESOURCE / 'install-manifest.json'
         original = json.loads(manifest.read_bytes())
-        for version in ('0.8.0', '0.5.0', 'not-a-version'):
+        for version in ('0.9.0', '0.5.0', 'not-a-version'):
             with self.subTest(version=version):
                 mutated = dict(original, version=version)
                 manifest.write_bytes(encode(mutated))
@@ -193,11 +362,11 @@ class InstallTests(unittest.TestCase):
                     i.load(self.home)
         manifest.write_bytes(encode(original))
         future = dict(i.VERSION_PROFILES['0.6.0'])
-        with patch.dict(i.VERSION_PROFILES, {'0.7.0': future}):
-            with patch.object(i, '__version__', '0.7.0'):
+        with patch.dict(i.VERSION_PROFILES, {'0.8.0': future}):
+            with patch.object(i, '__version__', '0.8.0'):
                 _, _, upgrade = i.build(self.home)
                 i.apply(self.home, upgrade['plan_id'])
-            with patch.object(i, '__version__', '0.6.0'):
+            with patch.object(i, '__version__', '0.7.0'):
                 with self.assertRaisesRegex(ValueError, 'downgrade'):
                     i.build(self.home)
 
@@ -222,7 +391,7 @@ class InstallTests(unittest.TestCase):
         (home / 'AGENTS.md').write_bytes(b'old instructions\n')
         current_role = i.role
         legacy_role = lambda effort: current_role(effort).replace(b'gpt-6-luna', b'gpt-5.6-luna')
-        with patch.object(i, '__version__', '0.6.0'), patch.object(i, 'role', side_effect=legacy_role):
+        with self.legacy_install(), patch.object(i, 'role', side_effect=legacy_role):
             _, _, plan = i.build(home)
             i.apply(home, plan['plan_id'])
             old_role = tomllib.loads((home / 'agents' / 'adaptive_luna_xhigh.toml').read_text())
@@ -230,8 +399,8 @@ class InstallTests(unittest.TestCase):
         future = dict(i.VERSION_PROFILES['0.6.0'])
         future['model'] = '"synthetic-future-root"'
         future['agents.default_subagent_model'] = '"synthetic-future-leaf"'
-        with patch.dict(i.VERSION_PROFILES, {'0.7.0': future}), \
-                patch.object(i, '__version__', '0.7.0'):
+        with patch.dict(i.VERSION_PROFILES, {'0.8.0': future}), \
+                patch.object(i, '__version__', '0.8.0'):
             _, _, upgrade = i.build(home)
             delta = {row['key']: row for row in upgrade['config_changes']}
             self.assertEqual(delta['model']['before'], '"gpt-6-astra"')
@@ -267,13 +436,13 @@ class InstallTests(unittest.TestCase):
         home.mkdir()
         (home / 'config.toml').write_bytes(b'model = "gpt-6-astra"\n')
         (home / 'AGENTS.md').write_bytes(b'old instructions\n')
-        with patch.object(i, '__version__', '0.6.0'):
+        with self.legacy_install():
             _, _, plan = i.build(home)
             i.apply(home, plan['plan_id'])
         future = dict(i.VERSION_PROFILES['0.6.0'])
         future['model'] = '"synthetic-rollback-root"'
-        with patch.dict(i.VERSION_PROFILES, {'0.7.0': future}), \
-                patch.object(i, '__version__', '0.7.0'):
+        with patch.dict(i.VERSION_PROFILES, {'0.8.0': future}), \
+                patch.object(i, '__version__', '0.8.0'):
             _, _, upgrade = i.build(home)
             result = i.apply(home, upgrade['plan_id'])
             self.assertEqual(i.build(home)[2]['files'], [])
@@ -284,7 +453,7 @@ class InstallTests(unittest.TestCase):
             _, _, repeat = i.build(home)
             self.assertEqual(repeat['config_changes'][0]['after'], '"synthetic-rollback-root"')
             self.assertEqual(i.apply(home, repeat['plan_id'])['status'], 'INSTALLED')
-            self.assertEqual(i.validate(home)['version'], '0.7.0')
+            self.assertEqual(i.validate(home)['version'], '0.8.0')
 
     def test_future_upgrade_preserves_ownership_metadata(self):
         home = self.base / 'future-metadata-upgrade-home'
@@ -292,15 +461,15 @@ class InstallTests(unittest.TestCase):
         original = b'model = "gpt-6-astra"\n'
         (home / 'config.toml').write_bytes(original)
         (home / 'AGENTS.md').write_bytes(b'old instructions\n')
-        with patch.object(i, '__version__', '0.6.0'):
+        with self.legacy_install():
             _, _, plan = i.build(home)
             i.apply(home, plan['plan_id'])
         manifest = home / i.RESOURCE / 'install-manifest.json'
         before = json.loads(manifest.read_bytes())
         future = dict(i.VERSION_PROFILES['0.6.0'])
         future['model'] = '"synthetic-metadata-root"'
-        with patch.dict(i.VERSION_PROFILES, {'0.7.0': future}), \
-                patch.object(i, '__version__', '0.7.0'):
+        with patch.dict(i.VERSION_PROFILES, {'0.8.0': future}), \
+                patch.object(i, '__version__', '0.8.0'):
             _, _, upgrade = i.build(home)
             self.assertEqual(i.apply(home, upgrade['plan_id'])['status'], 'INSTALLED')
             receipt = i.validate(home)
@@ -308,8 +477,8 @@ class InstallTests(unittest.TestCase):
             self.assertIn(key, receipt)
         for key in ('config_existed', 'agents_existed', 'created_config_tables'):
             self.assertEqual(receipt[key], before[key])
-        with patch.dict(i.VERSION_PROFILES, {'0.7.0': future}), \
-                patch.object(i, '__version__', '0.7.0'):
+        with patch.dict(i.VERSION_PROFILES, {'0.8.0': future}), \
+                patch.object(i, '__version__', '0.8.0'):
             _, _, uninstall = i.build(home, uninstall=True)
             i.apply(home, uninstall['plan_id'], uninstall=True)
         self.assertEqual((home / 'config.toml').read_bytes(), original)
@@ -319,12 +488,12 @@ class InstallTests(unittest.TestCase):
         home.mkdir()
         (home / 'config.toml').write_bytes(b'model = "gpt-5.6-sol"\n')
         (home / 'AGENTS.md').write_bytes(b'old instructions\n')
-        with patch.object(i, '__version__', '0.6.0'):
+        with self.legacy_install():
             _, _, plan = i.build(home)
             i.apply(home, plan['plan_id'])
         config = home / 'config.toml'
         config.write_bytes(b'model_provider = "custom"\n' + config.read_bytes())
-        with patch.object(i, '__version__', '0.6.0'):
+        with self.legacy_install():
             _, _, uninstall = i.build(home, uninstall=True)
             self.assertEqual(i.apply(home, uninstall['plan_id'], uninstall=True)['status'],
                              'UNINSTALLED')
@@ -473,6 +642,58 @@ class InstallTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'invalid'):
                     i.load(self.home)
                 manifest.write_bytes(encode(original))
+
+    def test_corrupt_before_scalar_is_rejected_before_uninstall_plan_or_apply(self):
+        config = self.home / 'config.toml'
+        config.write_bytes(b'# keep\n[agents]\nenabled = false\n[agents.custom]\nname = "keep"\n')
+        self.apply()
+        _, _, uninstall_plan = i.build(self.home, uninstall=True)
+        manifest = self.home / i.RESOURCE / 'install-manifest.json'
+        original_receipt = json.loads(manifest.read_bytes())
+        config_before = config.read_bytes()
+        cases = (
+            'false\n[agents.injected]\ncommand = "not-run"',
+            'false\ninjected = "extra document key"',
+            'false\n\n[agents.injected]\ncommand = "not-run"',
+        )
+        for injected in cases:
+            with self.subTest(before=injected):
+                altered = dict(original_receipt)
+                altered['config_changes'] = [dict(row) for row in original_receipt['config_changes']]
+                enabled = next(row for row in altered['config_changes'] if row['key'] == 'agents.enabled')
+                self.assertEqual(enabled['before'], 'false')
+                enabled['before'] = injected
+                manifest.write_bytes(encode(altered))
+                with self.assertRaisesRegex(ValueError, 'invalid original configuration type'):
+                    i.load(self.home)
+                with self.assertRaisesRegex(ValueError, 'invalid original configuration type'):
+                    i.build(self.home, uninstall=True)
+                with self.assertRaisesRegex(ValueError, 'invalid original configuration type'):
+                    i.apply(self.home, uninstall_plan['plan_id'], uninstall=True)
+                self.assertEqual(config.read_bytes(), config_before)
+                self.assertEqual(tomllib.loads(config.read_text())['agents']['custom']['name'], 'keep')
+                manifest.write_bytes(encode(original_receipt))
+
+    def test_toml_revert_writer_prevalidates_single_scalar_and_conflicts_atomically(self):
+        raw = '[agents]\nenabled = true\n[agents.custom]\nname = "keep"\n'
+        original = raw.encode('utf-8')
+        malicious = 'false\n[agents.injected]\ncommand = "not-run"'
+        request = {
+            'input': raw,
+            'mode': 'revert',
+            'changes': [{'key': 'agents.enabled', 'after': 'true', 'before': malicious}],
+        }
+        for before in (malicious, 'false\n'):
+            with self.subTest(before=before), self.assertRaisesRegex(ValueError, 'invalid managed scalar'):
+                i.toml_edit.run(dict(request, changes=[{'key': 'agents.enabled',
+                    'after': 'true', 'before': before}]))
+        self.assertEqual(original, raw.encode('utf-8'))
+
+        conflict = dict(request, changes=[{'key': 'agents.enabled', 'after': 'false', 'before': 'false'}])
+        result = i.toml_edit.run(conflict)
+        self.assertEqual(result['conflicts'], ['agents.enabled'])
+        self.assertEqual(result['changes'], [])
+        self.assertEqual(result['output'].encode('utf-8'), original)
 
     def test_committed_recover_without_backup_is_read_only_but_explicit_rollback_works(self):
         result = self.apply()

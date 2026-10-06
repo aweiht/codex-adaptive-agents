@@ -1,18 +1,18 @@
-# Codex Adaptive Agents 0.7.0
+# Codex Adaptive Agents 0.8.0
 
 [简体中文](README.zh-CN.md)
 
 Codex Adaptive Agents is a small Python runtime and installer for the official
-Codex CLI. It lets the Astra root agent choose a bounded Luna role when a task
-is worth delegating, while the official Codex client keeps ownership of login,
+Codex CLI. It lets the root agent choose a bounded Luna role when a task is
+worth delegating, while the official Codex client keeps ownership of login,
 provider access, and model execution.
 
 Installation, policy selection, and verification are implemented in this
 repository. No other agent-orchestration project is required. See the
 [implementation and dependency details](docs/UPSTREAM.md).
 
-After installation, continue to describe work in ordinary Codex tasks. Astra
-plans and reviews the work, while 0–5 native Luna children take clearly bounded
+After installation, continue to describe work in ordinary Codex tasks. The root
+agent plans and reviews the work, while 0–5 native Luna children take clearly bounded
 substantive work packages with explicit ownership and acceptance. The package
 adds configuration and scripts to Codex; it has no separate chat window and
 installs no background service or MCP server.
@@ -41,16 +41,17 @@ Complete the installation and report the source path, CODEX_HOME, plan result, a
 
 ### Step 2: open a new Codex task and verify
 
-This checks the local installation and role selection without starting an
-extra model test. `READY` or `READY_FALLBACK` plus a successful selection means
-the local installation check passed.
+This checks local installation readiness and child-role selection separately,
+without starting an extra model test. `READY` or `READY_FALLBACK` means the
+local installation is ready. A successful selection means a child role was
+chosen under the current Luna capability and policy data.
 
 ```text
 Verify my Codex Adaptive Agents installation:
 https://github.com/aweiht/codex-adaptive-agents
-Use this Codex client's existing CODEX_HOME and locate `CODEX_HOME/codex-adaptive-agents/runtime/codex-adaptive-agents.py`. With Python 3.11+ (`python3` on macOS/Linux or `py -3` on Windows), run `python3 "$CODEX_HOME/codex-adaptive-agents/runtime/codex-adaptive-agents.py" --codex-home "$CODEX_HOME" doctor` (or the equivalent `py -3` command) through that installed entry, then run `select --project <temporary-directory> --explain` in a separate temporary directory.
-Refresh only when doctor reports a stale capability snapshot or policy cache, and check doctor again. Confirm that selection returns an installed `adaptive_luna_*` role.
-Do not reinstall, change business files, run verify --live, call a model, or treat selection as a child-agent invocation. Report “local installation check passed” only when doctor is READY or READY_FALLBACK and selection succeeds; include the actual status, selected role, and any failure reason.
+Use this Codex client's existing CODEX_HOME and locate `CODEX_HOME/codex-adaptive-agents/runtime/codex-adaptive-agents.py`. With Python 3.11+ (`python3` on macOS/Linux or `py -3` on Windows), run `python3 "$CODEX_HOME/codex-adaptive-agents/runtime/codex-adaptive-agents.py" --codex-home "$CODEX_HOME" doctor` (or the equivalent `py -3` command) through that installed entry, then run `select --project <temporary-directory> --explain`. No main-model argument or confirmation is needed.
+Refresh only when doctor reports a stale child capability snapshot or policy cache, and check doctor again. Confirm selection returns an installed `adaptive_luna_*` role when local child capability and policy data allow it.
+Do not reinstall, change business files, run verify --live, call a model, or treat selection as a child-agent invocation. Report installation readiness from doctor independently from the selection result, with the actual statuses and any failure reason.
 ```
 
 ### Step 3: ask Codex to upgrade an existing installation
@@ -90,6 +91,23 @@ The installer manages a small, explicit scope in the user's Codex home:
 - A daily policy cache chooses one of those roles from the local public model
   catalogue and the two public radar sources. No model call is used for this
   selection.
+- `model_policy.json` remains in the runtime layout for receipt compatibility;
+  its metadata declares root-independent selection and contains no model list.
+
+### Main model and live overrides
+
+`select` does not read, require, or gate on the main model. Missing, unknown,
+current, and future model slugs all use the same child capability and policy
+checks. `--root-model` is accepted by `select` only as a compatibility argument
+and is ignored there. The runtime does not infer desktop-window identity or
+change the user's main model or reasoning effort.
+
+The root reasoning effort has no plugin-defined allowlist or forced `max`.
+`verify --live` uses the official client's defaults unless explicit
+`--root-model` or `--root-effort` overrides are supplied; explicit values must
+exactly match the public effective values before a turn starts. Missing or null
+public model and effort fields stay unknown. CLI settings do not identify the
+model used by a separate desktop Codex task.
 
 The installer changes the managed `agents` keys intentionally. It
 preserves unrelated configuration, roles, MCP settings, hooks, and other files
@@ -106,11 +124,14 @@ You need all of the following before applying an installation:
 - A Codex client that supports native custom agents. Normal use and live
   verification require model access and available account allowance.
 - A normally configured official Codex home and account whose public catalogue
-  exposes `gpt-6-astra` with `max`, plus `gpt-6-luna` with all five levels:
+  exposes `gpt-6-luna` with all five child levels:
   `low`, `medium`, `high`, `xhigh`, and `max`.
+- Main-model identity is not an eligibility condition. Delegation depends on
+  the installed Luna child capabilities and selection policy.
 
-The installer reads the CLI's public version and model catalogue through
-`codex --version` and `codex debug models`. It does not open authentication
+The installer reads the CLI's public version and child-model catalogue through
+`codex --version` and `codex debug models`. Child capability maintenance does
+not require the root model to appear in that catalogue. It does not open authentication
 files. A clone or downloaded ZIP does not guarantee that an account can use
 the required models. A blank or isolated `CODEX_HOME` may have no matching
 catalogue, in which case `install --yes` correctly refuses to proceed.
@@ -174,7 +195,7 @@ example:
 > independent work to Luna, then review the changes and report the verification.
 
 You do not need to start a worker or run the selector yourself. Before
-substantive work starts, Astra does only enough exploration to identify the
+substantive work starts, the root agent does only enough exploration to identify the
 boundary, then decides the route. Independent work can run in parallel, with
 at most five direct Luna children in one task. Before a delegation batch, the
 managed instructions call the daily selector; external rankings are only a
@@ -182,7 +203,7 @@ selection aid and do not guarantee lower token use, speed, or task quality.
 
 ### Delegation gate
 
-Astra owns requirements, key decisions, public interfaces, coordination, and
+The root agent owns requirements, key decisions, public interfaces, coordination, and
 final acceptance. A safe work package with an explicit goal, boundary, artifact
 or problem ownership, and checkable acceptance must be handed to a native Luna
 child when the host permits it, before that package starts. This is a trial
@@ -196,15 +217,15 @@ child after the work is complete.
 A full feature or UI diagnosis is one work package: the same child carries it
 through implementation, relevant verification scripts, build, test, package
 checks, and ordinary failure repair. Entering validation does not transfer
-execution to Astra; a normal failure returns to the package owner. Escalate
+execution to the root agent; a normal failure returns to the package owner. Escalate
 when a repair requires a public-interface change or major design decision, a
 failure stays unresolved after reasonable repair, or a capability or permission
-limit blocks the package. Astra defines acceptance criteria and risk boundaries,
+limit blocks the package. The root agent defines acceptance criteria and risk boundaries,
 reviews real diffs, key evidence, and boundaries at stage handoffs, and makes
-the acceptance decision. This does not require Astra to run every validation
-command or script. When independent execution review is needed, Astra may assign
+the acceptance decision. This does not require the root agent to run every validation
+command or script. When independent execution review is needed, the root agent may assign
 a bounded Luna review package with no write overlap, while retaining the
-decision; an extra reviewer is not required by default. Astra independently
+decision; an extra reviewer is not required by default. The root agent independently
 checks high-risk permission, real-data, and process-cleanup behavior within
 existing authorization boundaries, confirms required authorization is already
 in place, and does not infer or expand it. A child's report or exit code is not
@@ -212,7 +233,7 @@ a substitute for that check.
 
 Long tests, polling, sampling, and ordinary failure handling stay in that same
 Luna package. Scripts or native waits perform ongoing monitoring. Review stage
-deliveries together: Astra reads the handoff summary, relevant diff, and
+deliveries together: the root agent reads the handoff summary, relevant diff, and
 specific artifacts without taking over execution or repeating the same full
 exploration or tests. Expand checks only for a clear evidence conflict, missing
 key coverage, a pending decision, or a risk signal.
@@ -231,7 +252,7 @@ If the user specifies a worker count or parallel arrangement that cannot be met
 safely, explain the constraint and ask to adjust it; do not silently change the
 request. When recovery rules justify a root takeover, limit it to one pre-scoped
 small package within current authorization and state its close point; broader
-Astra execution requires the user's decision.
+root-agent execution requires the user's decision.
 
 | Situation | Route |
 | --- | --- |
@@ -286,7 +307,7 @@ one small, pre-scoped package within current authorization while Luna recovery
 is unresolved, and must stop at its stated close point. Do not keep renaming
 dependent packages as temporary takeovers: without new recovery evidence, leave
 later Luna-dependent work pending with its recovery condition, and ask the user
-before expanding Astra execution. Independent work may continue. Once a real
+before expanding root-agent execution. Independent work may continue. Once a real
 native dispatch recovery is evidenced, hand the remaining package back at a
 safe boundary; the root stops writing to that scope and records its evidence,
 remaining work, and new owner. Ordinary package test failures stay with the
@@ -295,8 +316,8 @@ original owner.
 The final reply includes a compact execution summary, for example:
 
 ```text
-Astra/Luna: direct · luna ×0
-Astra/Luna: delegated · luna_max ×2 · parallel
+Root/Luna: direct · luna ×0
+Root/Luna: delegated · luna_max ×2 · parallel
 ```
 
 These examples show the format, not a live run. Child levels and counts come
@@ -376,9 +397,9 @@ Use the matching repair path:
 - **Codex is missing or too old:** install or update the official CLI, run its
   normal `codex login`, then rerun `doctor`. If `codex` is not on `PATH`, pass
   `--codex /absolute/path/to/codex` to `install`, `doctor`, or `refresh`.
-- **The public catalogue is missing Astra/Luna:** run `codex debug models` in
-  the Codex home you intend to use. The required Astra Max and all five Luna
-  levels must be present before `install --yes` can write anything. An empty
+- **The public catalogue is missing Luna child levels:** run `codex debug models` in
+  the Codex home you intend to use. `gpt-6-luna` with all five child levels
+  must be present before `install --yes` can write anything. An empty
   isolated home cannot be used as a substitute for a working account.
 - **The local policy or capability snapshot is explicitly stale/blocked:**
   inspect the diagnostic, refresh once, then check `doctor` and the selected
@@ -406,8 +427,8 @@ python3 codex-adaptive-agents.py select --project /path/to/project
 python3 codex-adaptive-agents.py select --project /path/to/project --explain
 ```
 
-`select` chooses a role and does not start a child agent. The project policy
-cache lives in `.codex-adaptive-agents/state`; add `.codex-adaptive-agents/` to
+`select` chooses a role from child capability and policy data; it never starts a
+child agent. The project policy cache lives in `.codex-adaptive-agents/state`; add `.codex-adaptive-agents/` to
 the project's ignore file. `select` may refresh once per local day. `refresh`
 explicitly updates the public capability snapshot and policy inputs. Use
 `refresh --project /path/to/project` updates that project's policy inputs after
@@ -415,11 +436,12 @@ a same-day selection failure; plain `refresh` updates the home-level policy.
 These commands refresh local/public policy data only: they do not retry a native
 child dispatch or establish quota recovery. Neither command invokes a model.
 
-![Captured CLI checks](docs/images/cli-check.svg)
+![0.8.0 source CLI output for root-independent role selection](docs/images/cli-check.svg)
 
-_This SVG presents actual `doctor` and `select` output from a local 0.7.0
-installation captured on 2026-09-23, with private paths omitted. It shows local
-checks; it is not a Codex screenshot or evidence of a live model task._
+_This SVG presents actual source-CLI output for `select --project` without a
+root-model argument, captured on 2026-09-30 after a synthetic isolated
+installation and local fallback-cache setup. Private paths are omitted. It does
+not establish live model access._
 
 ## Optional live verification
 
@@ -432,7 +454,7 @@ For a real native task check, copy this prompt into Codex:
 Please run one live native-delegation check for my Codex Adaptive Agents installation:
 https://github.com/aweiht/codex-adaptive-agents
 I authorize this verify --live run to use real Codex allowance: at most two direct Luna children, a 600-second limit, and no automatic retry.
-Use the installed `CODEX_HOME/codex-adaptive-agents/runtime/codex-adaptive-agents.py` entry with Python 3.11+. Run doctor first, then run verify --live only if doctor passes.
+Use the installed `CODEX_HOME/codex-adaptive-agents/runtime/codex-adaptive-agents.py` entry with Python 3.11+. Run doctor first, then run verify --live only if doctor passes. By default, do not override the root model or effort. If I supply explicit `--root-model` or `--root-effort` values, pass them exactly and report whether the public effective values match.
 Let the command create its default isolated temporary verification directory; preserve the results and do not use an existing business directory.
 Inspect the command result and artifacts. Report a live pass only for LIVE_VERIFIED; otherwise explain the failure. Do not substitute role selection or model self-reports for execution evidence.
 Give the local result, live result, and evidence-file location.
@@ -460,6 +482,13 @@ python3 codex-adaptive-agents.py verify --live \
   --output /path/to/verification-output
 ```
 
+The default live command does not override root model or effort. It does not
+gate on the effective root model. Optional `--root-model` and `--root-effort`
+values are explicit requested overrides and must exactly match the effective
+public result. No plugin effort allowlist is applied to the root. This CLI's
+configuration is not an automatic read of a separate desktop Codex task's
+active model.
+
 The command uses a temporary official stdio test channel, starts at most two
 direct native Luna children, and is bounded at 600 seconds. A complete,
 independently checked run returns `LIVE_VERIFIED`. It may consume real quota;
@@ -468,7 +497,7 @@ an installed MCP server, daemon, Hook, scheduler, or resident process.
 
 ## Validation boundary
 
-The current 0.7.0 evidence is revision- and environment-specific. No new live
+The current 0.8.0 evidence is revision- and environment-specific. No new live
 model verification was requested for this revision, and no historical CI run
 proves the current source. See [docs/VALIDATION.md](docs/VALIDATION.md) for the
 current local boundary and the earlier published CI result tied to its exact
@@ -524,7 +553,7 @@ members, broken public Markdown links, private paths, and overwriting an
 existing archive:
 
 ```sh
-python3 scripts/release_python.py --output-dir dist/0.7.0-python
+python3 scripts/release_python.py --output-dir dist/0.8.0-python
 ```
 
 The project is distributed under the [Apache License 2.0](LICENSE). See

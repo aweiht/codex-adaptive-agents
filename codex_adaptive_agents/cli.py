@@ -15,12 +15,9 @@ from .platform import atomic, clean_env, encode, loads, read, run
 
 
 def resolve_codex(home, explicit=None):
-    value = explicit
-    if not value:
-        raw = read(home / install.RESOURCE / 'capabilities.json')
-        if raw:
-            value = loads(raw).get('codex')
-    value = value or 'codex'
+    # Snapshot metadata may describe the prior probe, but it is not authority
+    # to execute a path. Resolve an explicit caller choice or normal PATH entry.
+    value = explicit or 'codex'
     found = shutil.which(value)
     if not found:
         raise ValueError('official Codex CLI required; install it and run codex login')
@@ -41,7 +38,7 @@ def doctor(home, codex=None):
         raw = read(home / 'config.toml')
         _, changes = install.transform(raw, 'merge', desired=install.desired(raw))
         if changes:
-            raise ValueError('Astra/Luna defaults differ from installation')
+            raise ValueError('managed agent defaults differ from installation')
         result['checks']['managed_files_and_config'] = 'PASS'
         command = resolve_codex(home, codex)
         result['checks']['capabilities'] = policy.doctor_capabilities(home, command)
@@ -78,6 +75,8 @@ def parser():
     value.add_argument('--dry-run', action='store_true', help='preview install or uninstall without applying')
     value.add_argument('--explain', action='store_true')
     value.add_argument('--live', action='store_true', help='use real Codex allowance for two native tasks')
+    value.add_argument('--root-model', help='optional verify --live request override; ignored by select')
+    value.add_argument('--root-effort', help='optional root reasoning effort override for verify --live')
     value.add_argument('--run-id', help='process handoff run returned by process-init')
     value.add_argument('--owner', help='work package or child Agent identifier')
     value.add_argument('--purpose', help='short process purpose; do not include secrets')
@@ -125,6 +124,12 @@ def main(argv=None):
             raise ValueError('rollback requires --backup PATH')
         if args.live and command != 'verify':
             raise ValueError('--live is only valid for verify')
+        if args.root_model is not None and command not in ('select', 'verify'):
+            raise ValueError('--root-model is only valid for select or verify')
+        if args.root_effort is not None and command != 'verify':
+            raise ValueError('--root-effort is only valid for verify')
+        if args.root_effort is not None and not args.root_effort.strip():
+            raise ValueError('--root-effort must be nonempty')
         if child_argv is not None and command != 'process-run':
             raise ValueError('command arguments after -- are only valid for process-run')
         if command.startswith('process-'):
@@ -194,7 +199,7 @@ def main(argv=None):
             if snapshot is not None:
                 atomic(home / install.RESOURCE / 'capabilities.json', encode(snapshot))
                 try:
-                    selected = policy.select(home, force=True)
+                    selected = policy.select(home, force=True, codex=codex)
                     if selected.get('role') not in ('adaptive_luna_' + e for e in install.EFFORTS):
                         raise ValueError('no supported selection')
                 except (RuntimeError, ValueError, OSError):
@@ -219,7 +224,8 @@ def main(argv=None):
                 raise ValueError('leaf workers must not refresh or delegate')
         if command == 'select':
             project = Path(os.path.abspath(args.project or os.getcwd()))
-            selected = policy.select(home, project)
+            codex = resolve_codex(home, args.codex) if args.codex else None
+            selected = policy.select(home, project, codex=codex)
             if selected.get('role') not in ('adaptive_luna_' + e for e in install.EFFORTS):
                 raise ValueError('selection unavailable; run refresh; no role dispatched')
             if args.explain:
@@ -228,12 +234,13 @@ def main(argv=None):
                 print(selected['role'])
             return 0
         if command == 'refresh':
-            policy.refresh_capabilities(home, resolve_codex(home, args.codex))
+            codex = resolve_codex(home, args.codex)
+            policy.refresh_capabilities(home, codex)
             if args.project:
                 project = Path(os.path.abspath(args.project))
-                selected = policy.select(home, project, force=True)
+                selected = policy.select(home, project, force=True, codex=codex)
             else:
-                selected = policy.select(home, force=True)
+                selected = policy.select(home, force=True, codex=codex)
             if selected.get('role') not in ('adaptive_luna_' + e for e in install.EFFORTS):
                 raise ValueError('selection unavailable after refresh')
             show(selected)
@@ -252,11 +259,14 @@ def main(argv=None):
             else:
                 project = Path(tempfile.mkdtemp(prefix='codex-adaptive-agents-verify-')).resolve() / 'project'
             output = Path(os.path.abspath(args.output)) if args.output else project.parent / ('verification-' + str(time.time_ns()))
-            role = policy.select(home)['role']
-            if role not in ('adaptive_luna_' + e for e in install.EFFORTS):
-                raise ValueError('selection unavailable; no role dispatched')
-            print('Starting two native Luna tasks (up to 600 seconds); this uses Codex allowance.', file=sys.stderr)
-            result = verify.run(home, codex, project, output, role)
+            def select_role():
+                selected = policy.select(home, project, codex=codex)
+                if selected.get('role') not in ('adaptive_luna_' + e for e in install.EFFORTS):
+                    return selected
+                return selected['role']
+            result = verify.run(home, codex, project, output, None,
+                                root_model=args.root_model, root_effort=args.root_effort,
+                                select_role=select_role)
             show(result)
             return 0 if result.get('status') == 'LIVE_VERIFIED' else 1
         raise ValueError('unknown command')

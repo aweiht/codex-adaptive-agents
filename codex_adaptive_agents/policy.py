@@ -1,4 +1,4 @@
-"""Daily public-evidence policy for the Astra/Luna native route.
+"""Daily public-evidence policy for native Luna role selection.
 
 This module deliberately has no model or authentication integration.  It only
 reads the public capability snapshot, fetches the two public radar documents,
@@ -27,9 +27,8 @@ from zoneinfo import ZoneInfo
 from . import platform as _platform
 
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 RESOURCE = "codex-adaptive-agents"
-ROOT_MODEL = "gpt-6-astra"
 CHILD_MODEL = "gpt-6-luna"
 MODEL_DIAL_URL = "https://modeldial.com/api/v1/radar/latest.json"
 DENG_URL = "https://api.codexradar.com/api/v1/intelligence-efficiency?v=20260823-trend-cohort-v1"
@@ -102,7 +101,7 @@ def _strict_json(raw: bytes | str) -> object:
         return json.loads(raw, object_pairs_hook=pairs, parse_constant=constant)
     except PolicyError:
         raise
-    except (UnicodeError, json.JSONDecodeError, TypeError):
+    except (UnicodeError, TypeError, ValueError):
         raise PolicyError("invalid JSON") from None
 
 
@@ -603,16 +602,23 @@ def _decision(now: datetime, sources: list[dict], config: dict, previous: dict |
     else:
         decision["reasons"].append("insufficient comparable evidence; explicit local conservative fallback")
     decision["reasons"].append("tolerance and time thresholds are configured heuristics; no statistical equivalence or quality-loss guarantee; task acceptance still required")
+    decision["version"] = _decision_version(config, decision)
+    return decision
+
+
+def _decision_version(config: dict, decision: dict) -> str:
+    """Recompute the stable digest for a serialized policy decision."""
+    evidence = _copy(decision["selected_evidence"])
     identity = {
         "config": _jsonable(config), "effort": decision["default_effort"], "status": decision["status"],
-        "conflict": decision["conflict"], "evidence": _copy(decision["selected_evidence"]),
-        "batches": [s.get("source", "") + ":" + s.get("batch", "") + ":" + s.get("status", "") for s in sources],
+        "conflict": decision["conflict"], "evidence": evidence,
+        "batches": [s.get("source", "") + ":" + s.get("batch", "") + ":" + s.get("status", "")
+                    for s in decision["sources"]],
     }
     for evidence in identity["evidence"]:
         evidence["fetched_at"] = "0001-01-01T00:00:00Z"
     digest = hashlib.sha256(json.dumps(_jsonable(identity), ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()[:24]
-    decision["version"] = "policy-v1-" + digest
-    return decision
+    return "policy-v1-" + digest
 
 
 def select_policy(now: datetime, sources: list[dict], config: dict | None = None, previous: dict | None = None) -> dict:
@@ -652,7 +658,7 @@ def _cache(path: Path) -> dict | None:
         value = _strict_json(data)
     except PolicyError:
         raise PolicyError("policy cache invalid") from None
-    if not isinstance(value, dict) or value.get("schema") != 1:
+    if not isinstance(value, dict) or type(value.get("schema")) is not int or value.get("schema") != 1:
         raise PolicyError("policy cache invalid")
     allowed = {"schema", "attempted_days", "last_attempt", "last_success", "capabilities_at", "supported_efforts", "timezone", "day", "last_status", "config_key", "policy"}
     if set(value) - allowed:
@@ -696,9 +702,9 @@ def _read_snapshot_document(path: Path) -> dict:
     """Read the structurally valid public snapshot, including probe metadata.
 
     Freshness is intentionally checked by the caller. A stale but otherwise
-    valid snapshot still contains the absolute CLI path needed to retry the
-    live public catalogue; its effort set is never used as fallback after the
-    72 hour TTL.
+    valid snapshot still provides parseable metadata, but its CLI path is only
+    provenance and its effort set is never used as fallback after the 72 hour
+    TTL.
     """
     data = _read(path)
     if data is None or not data or len(data) > MAX_SOURCE_BYTES:
@@ -709,9 +715,20 @@ def _read_snapshot_document(path: Path) -> dict:
         raise PolicyError("public capability snapshot unavailable") from None
     if not isinstance(value, dict):
         raise PolicyError("public capability snapshot unavailable")
-    allowed = {"schema", "checked_at", "supported_efforts", "root_model", "child_model", "codex", "cli_version", "evidence"}
-    if (set(value) - allowed or value.get("schema") != 1 or
-            value.get("root_model") != ROOT_MODEL or value.get("child_model") != CHILD_MODEL):
+    schema = value.get("schema")
+    if type(schema) is int and schema == 1:
+        # Accept the previous verified handoff shape, but treat its root_model
+        # field as provenance only. Child capability does not depend on root.
+        allowed = {"schema", "checked_at", "supported_efforts", "root_model", "child_model", "codex", "cli_version", "evidence"}
+        legacy_root = value.get("root_model")
+        identity_ok = (isinstance(legacy_root, str) and bool(legacy_root.strip()) and
+                       value.get("child_model") == CHILD_MODEL)
+    elif type(schema) is int and schema == 2:
+        allowed = {"schema", "checked_at", "supported_efforts", "child_model", "codex", "cli_version", "evidence"}
+        identity_ok = value.get("child_model") == CHILD_MODEL
+    else:
+        raise PolicyError("public capability snapshot unavailable")
+    if set(value) - allowed or not identity_ok:
         raise PolicyError("public capability snapshot unavailable")
     efforts = value.get("supported_efforts")
     if not _valid_efforts(efforts):
@@ -726,12 +743,10 @@ def _read_snapshot_document(path: Path) -> dict:
     for field in ("cli_version", "evidence"):
         if field in value and (not isinstance(value[field], str) or not value[field]):
             raise PolicyError("public capability snapshot unavailable")
-    result = {"schema": 1, "checked_at": _stamp(checked),
-              "supported_efforts": _canonical_efforts(efforts),
-              "root_model": ROOT_MODEL, "child_model": CHILD_MODEL}
-    # The installer records public provenance. Preserve only the executable
-    # path needed for a later local catalogue refresh; all other metadata stays
-    # out of policy decisions and selector output.
+    result = {"schema": 2, "checked_at": _stamp(checked),
+              "supported_efforts": _canonical_efforts(efforts), "child_model": CHILD_MODEL}
+    # Keep the recorded path as provenance for inspection. Selection resolves
+    # its executable from an explicit caller choice or normal PATH.
     if codex:
         result["codex"] = codex
     return result
@@ -784,42 +799,109 @@ def _future_cache(cache: dict, now: datetime) -> bool:
 
 
 def _usable(cache: dict, result_stale: bool, now: datetime, config: dict) -> bool:
-    policy = cache.get("policy", {})
-    status = policy.get("status")
-    if status not in {"valid", "degraded", "fallback"} or cache.get("config_key") != config_key(config) or _future_cache(cache, now):
+    try:
+        policy = cache.get("policy", {})
+        if not isinstance(policy, dict):
+            return False
+        status = policy.get("status")
+        if (status not in {"valid", "degraded", "fallback"} or
+                cache.get("last_status") != status or
+                cache.get("config_key") != config_key(config) or _future_cache(cache, now)):
+            return False
+        age = _max_age(config)
+        if not _cache_fresh(now, cache.get("capabilities_at"), age) or not _cache_fresh(now, policy.get("generated_at"), age):
+            return False
+        efforts = cache.get("supported_efforts")
+        if not _valid_efforts(efforts) or efforts != _canonical_efforts(efforts):
+            return False
+        wanted = policy.get("default_effort")
+        if not isinstance(wanted, str) or wanted not in efforts or wanted not in EFFORTS:
+            return False
+        if not isinstance(policy.get("reasons"), list) or not all(isinstance(item, str) for item in policy["reasons"]):
+            return False
+        if policy.get("runtime_route") != config.get("runtime_route") or type(policy.get("conflict")) is not bool:
+            return False
+        sources = policy.get("sources")
+        evidence = policy.get("selected_evidence")
+        if (not isinstance(sources, list) or
+                not all(isinstance(row, dict) and all(isinstance(row.get(key, ""), str)
+                    for key in ("source", "batch", "status")) and
+                    row.get("source") in {"modeldial", "deng"} and
+                    row.get("status") in {"ok", "degraded", "unavailable"}
+                    for row in sources) or
+                not isinstance(evidence, list)):
+            return False
+        effective_config = dict(config)
+        effective_config["supported_efforts"] = list(efforts)
+        quality_effort = policy.get("quality_effort")
+        if not isinstance(quality_effort, str) or (quality_effort and quality_effort not in efforts):
+            return False
+        if status == "fallback":
+            if wanted != config.get("fallback_effort") or evidence:
+                return False
+        else:
+            if (not evidence or wanted not in [row.get("effort") for row in evidence if isinstance(row, dict)] or
+                    not all(isinstance(row, dict) and row.get("source") in {"modeldial", "deng"} and
+                            isinstance(row.get("batch"), str) and bool(row.get("batch")) and
+                            _measurement_complete(row, now, effective_config) for row in evidence)):
+                return False
+            if (not policy.get("conflict") and quality_effort and
+                    quality_effort != evidence[0].get("effort")):
+                return False
+            if status == "valid" and quality_effort != evidence[0].get("effort"):
+                return False
+            if status == "valid":
+                source_names = [row["source"] for row in sources]
+                if (len(sources) < 2 or len(set(source_names)) != len(source_names) or
+                        any(row["status"] != "ok" for row in sources)):
+                    return False
+                for row in evidence:
+                    if not any(row in source.get("rows", []) and
+                               source.get("source") == row.get("source") and
+                               source.get("batch") == row.get("batch")
+                               for source in sources):
+                        return False
+            if status == "valid" and policy.get("conflict"):
+                return False
+        if status != "fallback" and not _cache_fresh(now, cache.get("last_success"), age):
+            return False
+        if not re.fullmatch(r"policy-v1-[0-9a-f]{24}", str(policy.get("version", ""))):
+            return False
+        return policy["version"] == _decision_version(effective_config, policy)
+    except (AttributeError, KeyError, OverflowError, PolicyError, TypeError, ValueError):
         return False
-    age = _max_age(config)
-    if not _cache_fresh(now, cache.get("capabilities_at"), age) or not _cache_fresh(now, policy.get("generated_at"), age):
-        return False
-    efforts = cache.get("supported_efforts")
-    wanted = policy.get("default_effort")
-    if not _valid_efforts(efforts) or wanted not in efforts:
-        return False
-    if status == "fallback" and wanted != config.get("fallback_effort"):
-        return False
-    if status != "fallback" and not _cache_fresh(now, cache.get("last_success"), age):
-        return False
-    return wanted in EFFORTS
 
 
 def _result(cache: dict, now: datetime, config: dict, *, refreshed: bool = False, refresh_in_progress: bool = False) -> dict:
-    stale = _cache_stale(cache, now, config)
+    try:
+        stale = _cache_stale(cache, now, config)
+    except PolicyError:
+        stale = True
     policy = cache.get("policy") if isinstance(cache.get("policy"), dict) else {}
     usable = _usable(cache, stale, now, config)
     effort = policy.get("default_effort", "") if usable else ""
-    status = policy.get("status", "blocked") or "blocked"
+    status = (policy.get("status", "blocked") or "blocked") if usable else "blocked"
+    reasons = policy.get("reasons")
+    if not isinstance(reasons, list) or not all(isinstance(item, str) for item in reasons):
+        reasons = []
+    generated_at = policy.get("generated_at")
+    if not isinstance(generated_at, str):
+        generated_at = _stamp(now)
+    capabilities_at = cache.get("capabilities_at")
+    if not isinstance(capabilities_at, str):
+        capabilities_at = _stamp(None)
     return {
         "role": "adaptive_luna_" + effort if usable else "",
         "effort": effort,
         "status": status,
-        "policy_version": policy.get("version", ""),
+        "policy_version": policy.get("version", "") if usable and isinstance(policy.get("version"), str) else "",
         "refreshed": bool(refreshed),
         "stale": stale,
-        "reasons": list(policy.get("reasons") or []),
-        "generated_at": policy.get("generated_at", _stamp(None)),
-        "capabilities_at": cache.get("capabilities_at", _stamp(None)),
-        "day": cache.get("day", ""),
-        "timezone": cache.get("timezone", ""),
+        "reasons": list(reasons),
+        "generated_at": generated_at,
+        "capabilities_at": capabilities_at,
+        "day": cache.get("day", "") if isinstance(cache.get("day", ""), str) else "",
+        "timezone": cache.get("timezone", "") if isinstance(cache.get("timezone", ""), str) else "",
         "refresh_in_progress": bool(refresh_in_progress),
     }
 
@@ -936,7 +1018,8 @@ def cached_select(home: Path, project: Path | None = None, *, now: datetime | No
     return read_cached(home, project, now=now)
 
 
-def _native_inputs(home: Path, snapshot: dict | None, now: datetime) -> tuple[list[dict], list[str], str, bool]:
+def _native_inputs(home: Path, snapshot: dict | None, now: datetime,
+                   codex: str | None = None) -> tuple[list[dict], list[str], str, bool]:
     """Fetch sources and the local catalogue concurrently for one refresh.
 
     The returned capability timestamp is the observation time of the selected
@@ -948,14 +1031,10 @@ def _native_inputs(home: Path, snapshot: dict | None, now: datetime) -> tuple[li
     guard = threading.Lock()
     closed = False
     deadline = _clock.monotonic() + SOURCE_TIMEOUT
-    # A snapshot normally carries the installer-resolved absolute executable.
-    # Cold installs have no snapshot yet, so retain the public CLI contract's
-    # default command and let PATH resolution happen in the child process.
-    codex = snapshot.get("codex") if isinstance(snapshot, dict) else "codex"
-    if not isinstance(codex, str) or not codex:
-        codex = "codex"
-    if not Path(codex).is_absolute() and codex != "codex":
-        codex = ""
+    # Capability metadata is data, not authority to execute a path. Callers
+    # may pass a CLI already resolved from an explicit option; library callers
+    # without one use the normal PATH command.
+    codex = codex if isinstance(codex, str) and codex else "codex"
 
     def put(key: str, value: object) -> None:
         nonlocal closed
@@ -1060,7 +1139,8 @@ def _native_inputs(home: Path, snapshot: dict | None, now: datetime) -> tuple[li
     return sources, efforts, capability_at, capability_fallback
 
 
-def select(home: Path, project: Path | None = None, *, force: bool = False, now: datetime | None = None) -> dict:
+def select(home: Path, project: Path | None = None, *, force: bool = False,
+           now: datetime | None = None, codex: str | None = None) -> dict:
     """Select one fixed Luna role, refreshing at most once per local day."""
     now = _utc(now)
     if os.environ.get("ORCHESTRATOR_WORKER") == "1":
@@ -1072,20 +1152,45 @@ def select(home: Path, project: Path | None = None, *, force: bool = False, now:
     cache_path = state / "policy-cache.json"
     lock_path = state / "policy-refresh.lock"
     _safe(cache_path)
-    cache = _cache(cache_path) or _new_cache(now, base_config)
+    cache_invalid = False
+    try:
+        cache = _cache(cache_path)
+    except PolicyError:
+        # Ordinary selection must not reset a malformed cache and erase its
+        # daily attempt marker. An explicit forced refresh is the repair path.
+        if not force:
+            return _empty_result(now, "policy cache invalid; run refresh")
+        cache = None
+        cache_invalid = True
+    if cache is None:
+        cache = _new_cache(now, base_config)
     timezone_name, _zone, local_day = _system_timezone(now)
     day_key = timezone_name + ":" + local_day
     try:
         with _platform.file_lock(lock_path, timeout=5):
-            latest = _cache(cache_path)
+            try:
+                latest = _cache(cache_path)
+            except PolicyError:
+                if not force:
+                    return _empty_result(now, "policy cache invalid; run refresh",
+                                         timezone_name=timezone_name, day=local_day)
+                latest = None
+                cache_invalid = True
             if latest is not None:
                 cache = latest
+                cache_invalid = False
+            elif cache_invalid or cache is None:
+                cache = _new_cache(now, base_config)
             previous_matches = cache.get("config_key") == config_key(base_config)
             if not previous_matches:
                 # A model or policy identity change gets one fresh attempt for
                 # this local day. Do not carry supported efforts, capability
                 # timestamps, or scored evidence across identities.
                 cache = _new_cache(now, base_config)
+            # Preserve an earlier decision only if the complete cache is still
+            # usable. Capture this before `last_status` becomes `refreshing`.
+            previous = (cache.get("policy") if previous_matches and
+                        _usable(cache, False, now, base_config) else None)
             attempted = day_key in (cache.get("attempted_days") or {})
             if attempted and not force:
                 return _result(cache, now, base_config)
@@ -1107,7 +1212,8 @@ def select(home: Path, project: Path | None = None, *, force: bool = False, now:
             # The direct probe and both public source requests share this one
             # daily refresh budget. The snapshot is a capability fallback only;
             # its checked_at remains unchanged in the project cache.
-            sources, efforts, capability_at, capability_fallback = _native_inputs(Path(home), snapshot, now)
+            sources, efforts, capability_at, capability_fallback = _native_inputs(
+                Path(home), snapshot, now, codex=codex)
             if efforts:
                 cache["supported_efforts"] = list(efforts)
                 cache["capabilities_at"] = capability_at
@@ -1121,7 +1227,6 @@ def select(home: Path, project: Path | None = None, *, force: bool = False, now:
                                 _valid_efforts(cache.get("supported_efforts")))
             if capability_fresh:
                 config["supported_efforts"] = list(cache["supported_efforts"])
-            previous = cache.get("policy") if previous_matches else None
             try:
                 decision = _decision(now, sources, config, previous)
             except PolicyError as error:
@@ -1147,6 +1252,12 @@ def select(home: Path, project: Path | None = None, *, force: bool = False, now:
             return _result(cache, now, base_config, refreshed=True)
     except RuntimeError:
         return _result(cache, now, base_config, refresh_in_progress=True)
+
+
+def select_for_root(home: Path, project: Path | None, root_model: str | None,
+                    *, now: datetime | None = None) -> dict:
+    """Compatibility spelling; ``root_model`` does not affect selection."""
+    return select(home, project, now=now)
 
 
 _VERSION_RE = re.compile(r"codex-cli\s+(\d+)\.(\d+)\.(\d+)(?:[-+][A-Za-z0-9.-]+)?\s*$")
@@ -1190,16 +1301,13 @@ def _catalog_efforts(raw: bytes, *, require_full: bool = False) -> list[str]:
     if not isinstance(value, dict) or set(value) != {"models"} or not isinstance(value.get("models"), list):
         raise PolicyError("unsupported public model catalogue schema")
     luna_levels = None
-    astra_levels = None
     for item in value["models"]:
         if not isinstance(item, dict):
             raise PolicyError("unsupported public model catalogue schema")
         slug = item.get("slug")
-        if slug not in {ROOT_MODEL, CHILD_MODEL}:
+        if slug != CHILD_MODEL:
             continue
-        if slug == CHILD_MODEL and luna_levels is not None:
-            raise PolicyError("duplicate requested model in public catalogue")
-        if slug == ROOT_MODEL and astra_levels is not None:
+        if luna_levels is not None:
             raise PolicyError("duplicate requested model in public catalogue")
         levels = item.get("supported_reasoning_levels")
         if not isinstance(levels, list):
@@ -1211,17 +1319,14 @@ def _catalog_efforts(raw: bytes, *, require_full: bool = False) -> list[str]:
             efforts.append(level["effort"])
         if len(efforts) != len(set(efforts)):
             raise PolicyError("duplicate reasoning level")
-        if slug == CHILD_MODEL:
-            luna_levels = efforts
-        else:
-            astra_levels = efforts
+        luna_levels = efforts
     if luna_levels is None:
         raise PolicyError("public client catalogue does not contain Luna")
     supported = _canonical_efforts([effort for effort in luna_levels if effort in EFFORTS])
     if not supported:
         raise PolicyError("public client catalogue contains no supported Luna effort")
-    if require_full and (astra_levels is None or "max" not in astra_levels or set(supported) != set(EFFORTS)):
-        raise PolicyError("public client catalogue does not support the required Astra/Luna roles")
+    if require_full and set(supported) != set(EFFORTS):
+        raise PolicyError("public client catalogue does not support all five Luna roles")
     return supported
 
 
@@ -1249,8 +1354,8 @@ def preflight(home: Path, codex: str, *, now: datetime | None = None) -> dict:
         raise PolicyError("absolute Codex home required")
     cli = _check_cli_version(_stdout(_run_codex(home, [codex, "--version"], timeout=5, limit=65536)))
     efforts = _catalog_efforts(_stdout(_run_codex(home, [codex, "debug", "models"], timeout=5, limit=MAX_SOURCE_BYTES)), require_full=True)
-    return {"schema": 1, "checked_at": _stamp(_utc(now)), "supported_efforts": efforts,
-            "root_model": ROOT_MODEL, "child_model": CHILD_MODEL, "codex": codex, "cli_version": cli,
+    return {"schema": 2, "checked_at": _stamp(_utc(now)), "supported_efforts": efforts,
+            "child_model": CHILD_MODEL, "codex": codex, "cli_version": cli,
             "evidence": "public_client_catalogue"}
 
 
@@ -1288,7 +1393,7 @@ def doctor_capabilities(home: Path, codex: str) -> dict:
 __all__ = [
     "VERSION", "RESOURCE", "EFFORTS", "MODEL_DIAL_URL", "DENG_URL", "PolicyError",
     "config_key", "parse_modeldial", "parse_deng", "fetch_sources", "FetchSources",
-    "select_policy", "read_cached", "cached_select", "select", "read_capabilities",
+    "select_policy", "read_cached", "cached_select", "select", "select_for_root", "read_capabilities",
     "direct_supported_efforts", "DirectSupportedEfforts", "preflight",
     "refresh_capabilities", "doctor_capabilities",
 ]

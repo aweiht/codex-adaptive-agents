@@ -1,6 +1,34 @@
 # Changelog
 
-## 0.7.0 — Unreleased
+## 0.8.0 — Unreleased
+
+- Remove root-model eligibility checks: selection works the same for missing,
+  unknown, current, and future root model identities. Keep the
+  `model_policy.json` runtime path only for exact install-receipt compatibility;
+  it contains unrestricted metadata and does not drive selection.
+- Preserve the user's main model and effort. Live verification uses official
+  client defaults unless an explicit root model or effort override is supplied;
+  requested and public effective values must match before any turn starts.
+- Keep capability snapshots child-only while accepting structurally valid
+  legacy schema-1 snapshots with root identity recorded as provenance. Maintain
+  the public Luna child catalogue independently of the root model.
+- Accept the exact legacy 0.6.0/early 0.7.0 install receipt path layout as well
+  as the new current layout, while rejecting incomplete and extra paths.
+- Bind release staging and ZIP validation to one checked source snapshot;
+  reject missing, extra, and self-checksummed payload changes. Create archive
+  and external checksum targets exclusively so raced symlinks are not followed.
+- Resolve the Codex CLI from normal `PATH` unless the caller supplies
+  `--codex`; treat a recorded snapshot path as metadata, not execution authority.
+  Keep ordinary selection read-only for an invalid cache and require explicit
+  refresh to repair it after revalidating prior cache state under the lock.
+- Reject conflicting sibling and nested terminal turn statuses after public
+  status normalization, and reject malformed present `spawnAgent` model or
+  reasoning-effort claims while preserving missing/null compatibility.
+- Normalize oversized JSON integer conversion errors as policy failures so
+  invalid caches remain byte-preserved in normal mode and explicit refresh can
+  repair them without changing Python's integer conversion limit.
+
+## 0.7.0 — Previous source snapshot
 
 - Replace the generic failure-to-root fallback with classified native-dispatch
   recovery: cap temporary retries even with `retry-after`, preserve the budget
@@ -140,5 +168,5 @@ and the standard library.
   separately in the receipt for uninstall and recovery.
 
 
-The current 0.7.0 contract and package contents are defined by README.md,
+The current 0.8.0 contract and package contents are defined by README.md,
 docs/PUBLIC_GUIDE.md, and release-manifest.json.

@@ -19,7 +19,7 @@
 <text x="530" y="251" fill="#00FFCC" font-size="22" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">使用</text>
 <text x="470" y="311" fill="#F3F7F9" font-size="25" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">打开新的 Codex 任务</text>
 <text x="470" y="360" fill="#F3F7F9" font-size="23" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">正常描述需求</text>
-<text x="470" y="398" fill="#F3F7F9" font-size="23" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">Astra 规划与最终验收</text>
+<text x="470" y="398" fill="#F3F7F9" font-size="23" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">主 Agent 规划与最终验收</text>
 <text x="470" y="436" fill="#F3F7F9" font-size="23" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">按需使用 0–5 个 Luna</text>
 <text x="470" y="471" fill="#B9C8D2" font-size="19" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">小任务可由主 Agent 直接完成</text>
 <rect x="848" y="203" width="384" height="290" rx="16" fill="#1A252E"/>

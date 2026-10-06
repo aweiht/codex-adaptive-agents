@@ -18,13 +18,15 @@ RESOURCE = 'codex-adaptive-agents'
 ENTRY = RESOURCE + '/runtime/codex-adaptive-agents.py'
 MARKER = 'CODEX_ADAPTIVE_AGENTS'
 EFFORTS = ('low', 'medium', 'high', 'xhigh', 'max')
-RUNTIME_FILES = ('codex-adaptive-agents.py', 'codex_adaptive_agents/__init__.py', 'codex_adaptive_agents/cli.py',
- 'codex_adaptive_agents/install.py', 'codex_adaptive_agents/toml_edit.py', 'codex_adaptive_agents/platform.py',
- 'codex_adaptive_agents/policy.py', 'codex_adaptive_agents/verify.py', 'codex_adaptive_agents/transport.py', 'codex_adaptive_agents/process_tree.py',
- 'codex_adaptive_agents/process_registry.py',
- 'codex_adaptive_agents/assets/parent.md',
+LEGACY_RUNTIME_FILES = ('codex-adaptive-agents.py', 'codex_adaptive_agents/__init__.py',
+ 'codex_adaptive_agents/cli.py', 'codex_adaptive_agents/install.py',
+ 'codex_adaptive_agents/toml_edit.py', 'codex_adaptive_agents/platform.py',
+ 'codex_adaptive_agents/policy.py', 'codex_adaptive_agents/verify.py',
+ 'codex_adaptive_agents/transport.py', 'codex_adaptive_agents/process_tree.py',
+ 'codex_adaptive_agents/process_registry.py', 'codex_adaptive_agents/assets/parent.md',
  'codex_adaptive_agents/assets/leaf.md', 'codex_adaptive_agents/assets/contract.md',
  'codex_adaptive_agents/assets/normalize_tags.py', 'codex_adaptive_agents/assets/unique_numbers.py')
+RUNTIME_FILES = LEGACY_RUNTIME_FILES + ('codex_adaptive_agents/model_policy.json',)
 
 # Receipt configuration is a compatibility contract, rather than a claim
 # that any model named by a receipt is acceptable.  A maintainer may add a
@@ -38,6 +40,11 @@ VERSION_PROFILES = {
         'agents.max_threads':'5', 'agents.max_concurrent_threads_per_session':'5',
     },
     '0.7.0': {
+        'agents.enabled':'true', 'agents.default_subagent_model':'"gpt-6-luna"',
+        'agents.default_subagent_reasoning_effort':'"xhigh"',
+        'agents.max_threads':'5', 'agents.max_concurrent_threads_per_session':'5',
+    },
+    '0.8.0': {
         'agents.enabled':'true', 'agents.default_subagent_model':'"gpt-6-luna"',
         'agents.default_subagent_reasoning_effort':'"xhigh"',
         'agents.max_threads':'5', 'agents.max_concurrent_threads_per_session':'5',
@@ -78,11 +85,9 @@ def _trusted_profile(version):
         if key not in toml_edit.TYPES or not isinstance(literal, str):
             raise ValueError('invalid trusted default profile')
         try:
-            value = tomllib.loads('v=' + literal)['v']
-        except (KeyError, TypeError, ValueError, tomllib.TOMLDecodeError):
+            value = toml_edit.scalar_value(literal, key)
+        except ValueError:
             raise ValueError('invalid trusted default profile') from None
-        if type(value) is not toml_edit.TYPES[key]:
-            raise ValueError('invalid trusted default profile')
         if toml_edit.TYPES[key] is int and value < 1:
             raise ValueError('invalid trusted default profile')
     return dict(profile)
@@ -202,6 +207,21 @@ def owned_paths():
     result = {f'agents/adaptive_luna_{e}.toml' for e in EFFORTS}
     result.update(RESOURCE + '/runtime/' + p for p in RUNTIME_FILES)
     return result
+
+
+def _receipt_owned_path_layouts(version):
+    """Return the exact source-declared runtime layouts accepted per version."""
+    roles = {f'agents/adaptive_luna_{effort}.toml' for effort in EFFORTS}
+    legacy = frozenset(roles | {RESOURCE + '/runtime/' + name for name in LEGACY_RUNTIME_FILES})
+    current = frozenset(owned_paths())
+    if version == '0.6.0':
+        return {legacy}
+    if version == '0.7.0':
+        # Early 0.7.0 receipts predate the model policy runtime data file.
+        return {legacy, current}
+    if version == '0.8.0':
+        return {current}
+    return {current}
 
 
 def block_span(raw):
@@ -325,11 +345,10 @@ def load(home):
         raise ValueError('invalid receipt status')
     profile = _receipt_profile(receipt)
     owned = receipt.get('owned_files', {})
-    required = owned_paths()
     if not isinstance(owned, dict):
         raise ValueError('invalid receipt paths')
     owned_keys = set(owned)
-    if owned_keys != required:
+    if frozenset(owned_keys) not in _receipt_owned_path_layouts(receipt['version']):
         raise ValueError('invalid receipt paths')
     if any(not isinstance(h, str) or not re.fullmatch('[0-9a-f]{64}', h) for h in owned.values()):
         raise ValueError('invalid receipt hash')
@@ -351,11 +370,9 @@ def load(home):
             if not isinstance(before, str):
                 raise ValueError('invalid original configuration type')
             try:
-                value = tomllib.loads('v=' + before)['v']
-            except (KeyError, TypeError, ValueError, tomllib.TOMLDecodeError):
+                value = toml_edit.scalar_value(before, key)
+            except ValueError:
                 raise ValueError('invalid original configuration type') from None
-            if type(value) is not toml_edit.TYPES[key]:
-                raise ValueError('invalid original configuration type')
     block = receipt.get('block', '')
     if (not isinstance(block, str) or
             not block.startswith(f'<!-- BEGIN {MARKER} -->\n') or
@@ -370,7 +387,7 @@ def load(home):
 def _removed_root_preferences(receipt, target_profile):
     """Identify the one versioned migration that returns root preferences to the user."""
     if (not isinstance(receipt, dict) or receipt.get('version') != '0.6.0' or
-            __version__ != '0.7.0'):
+            _version_tuple(__version__) < (0, 7, 0)):
         return frozenset()
     prior = _receipt_profile(receipt)
     return frozenset(key for key in ROOT_PREFERENCE_KEYS
@@ -384,6 +401,9 @@ def validate(home, *, for_upgrade=False):
     for relative, expected in receipt['owned_files'].items():
         if sha(read(home / relative)) != expected:
             raise ValueError('managed file changed or missing: ' + relative)
+    for relative in owned_paths() - set(receipt['owned_files']):
+        if read(home / relative) is not None:
+            raise ValueError('unowned installation destination: ' + relative)
     raw = read(home / 'AGENTS.md') or b''
     span = block_span(raw)
     if span is None or raw[slice(*span)].decode('utf-8') != receipt['block']:

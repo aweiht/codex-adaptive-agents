@@ -5,6 +5,16 @@ TYPES={'model':str,'model_reasoning_effort':str,'agents.enabled':bool,'features.
  'agents.default_subagent_model':str,'agents.default_subagent_reasoning_effort':str}
 MANAGED=set(TYPES)
 def parsed(raw):return tomllib.loads(raw)
+
+def scalar_value(literal,key):
+ if key not in TYPES or not isinstance(literal,str) or '\n' in literal or '\r' in literal:raise ValueError('invalid managed scalar')
+ try:obj=parsed('v='+literal)
+ except Exception:raise ValueError('invalid managed scalar') from None
+ if not isinstance(obj,dict) or set(obj)!={'v'}:raise ValueError('invalid managed scalar')
+ value=obj['v']
+ if type(value) is not TYPES[key]:raise ValueError('invalid managed scalar')
+ return value
+
 def lookup(obj,path):
  for part in path.split('.'):
   if not isinstance(obj,dict) or part not in obj:return None
@@ -115,6 +125,8 @@ def managed_locations(raw):
  return loc
 
 def set_value(raw,key,literal):
+ if key not in MANAGED:raise ValueError('unmanaged key')
+ if literal is not None:scalar_value(literal,key)
  obj=parsed(raw);loc=managed_locations(raw)
  if key in loc:
   start,end,a,b,old=loc[key]
@@ -187,13 +199,21 @@ def remove_created_tables(raw,tables):
  return raw
 
 def run(req):
- raw=req['input'];obj=parsed(raw);locations=managed_locations(raw);changes=[];conflicts=[];created_tables=[]
- if req['mode']=='merge':
-  for key,value in sorted(req['desired'].items()):
+ raw=req['input']
+ if not isinstance(raw,str):raise ValueError('TOML input must be text')
+ mode=req.get('mode')
+ if mode not in ('merge','revert'):raise ValueError('unsupported TOML edit mode')
+ obj=parsed(raw);locations=managed_locations(raw);changes=[];conflicts=[];created_tables=[]
+ if mode=='merge':
+  desired=req.get('desired',{})
+  if not isinstance(desired,dict):raise ValueError('invalid desired managed values')
+  validated=[]
+  for key,value in sorted(desired.items()):
    if key not in MANAGED:raise ValueError('unmanaged key')
-   actual=parsed('v='+value)['v']
-   if type(actual) is not TYPES[key]:raise ValueError('wrong scalar type')
+   actual=scalar_value(value,key)
    if TYPES[key] is int and actual<1:raise ValueError('invalid native concurrency')
+   validated.append((key,value,actual))
+  for key,value,actual in validated:
    current=lookup(obj,key)
    if current is not None and type(current) is not TYPES[key]:raise ValueError('wrong managed scalar type')
    if current==actual:continue
@@ -205,14 +225,25 @@ def run(req):
    raw=set_value(raw,key,value);parsed(raw)
    changes.append({'key':key,'before':before,'after':value})
  else:
-  for ch in req['changes']:
+  requested=req.get('changes',[])
+  if not isinstance(requested,list):raise ValueError('invalid managed changes')
+  validated=[];seen=set();current_obj=parsed(raw)
+  for ch in requested:
+   if not isinstance(ch,dict):raise ValueError('invalid managed change')
    key=ch['key']
-   if key not in MANAGED:raise ValueError('unmanaged receipt key')
-   current=lookup(parsed(raw),key)
-   expected=parsed('v='+ch['after'])['v']
-   if type(current) is not type(expected) or current!=expected:conflicts.append(key);continue
+   if key not in MANAGED or key in seen:raise ValueError('unmanaged or duplicate receipt key')
+   seen.add(key)
+   expected=scalar_value(ch['after'],key)
+   before=ch.get('before')
+   if before is not None:scalar_value(before,key)
+   current=lookup(current_obj,key)
+   if type(current) is not type(expected) or current!=expected:conflicts.append(key)
+   validated.append((ch,key,before))
+  if conflicts:return {'output':raw,'changes':[],'conflicts':conflicts,'created_tables':[]}
+  for ch,key,before in validated:
    try:raw=set_value(raw,key,ch['before']);parsed(raw)
    except ValueError:conflicts.append(key)
+  if conflicts:return {'output':req['input'],'changes':[],'conflicts':conflicts,'created_tables':[]}
  parsed(raw);return {'output':raw,'changes':changes,'conflicts':conflicts,'created_tables':created_tables}
 if __name__ == '__main__':
  try:

@@ -14,6 +14,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from unittest import mock
 
 sys.dont_write_bytecode = True
 
@@ -21,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("release_python", ROOT / "scripts" / "release_python.py")
 assert SPEC is not None and SPEC.loader is not None
 release = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = release
 SPEC.loader.exec_module(release)
 
 
@@ -59,6 +61,33 @@ def run_workflow_archive_check(cwd: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
+def rewrite_archive(source: Path, target: Path, transform) -> None:
+    """Rebuild a ZIP and its self-contained SHA256SUMS after a mutation."""
+    with zipfile.ZipFile(source, "r") as package:
+        root_entry = next(info.filename for info in package.infolist() if info.is_dir())
+        root = root_entry.rstrip("/")
+        entries = {
+            info.filename: (info.external_attr >> 16, package.read(info.filename))
+            for info in package.infolist()
+            if not info.is_dir()
+        }
+    transform(entries, root)
+    payloads = {
+        name[len(root) + 1 :]: data
+        for name, (_mode, data) in entries.items()
+        if name.startswith(root + "/") and name != root + "/SHA256SUMS"
+    }
+    checksums = "".join(
+        f"{hashlib.sha256(data).hexdigest()}  {name}\n"
+        for name, data in sorted(payloads.items())
+    ).encode("utf-8")
+    entries[root + "/SHA256SUMS"] = (stat.S_IFREG | 0o644, checksums)
+    with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as package:
+        package.writestr(release._zip_info(root + "/", 0o755, directory=True), b"")
+        for name, (mode, data) in sorted(entries.items()):
+            package.writestr(release._zip_info(name, mode), data)
+
+
 class ReleaseBuilderTest(unittest.TestCase):
     def test_safe_paths_reject_traversal_and_platform_paths(self):
         for value in ("", ".", "..", "../secret", "a/../b", "/absolute", "C:/absolute",
@@ -71,7 +100,7 @@ class ReleaseBuilderTest(unittest.TestCase):
 
     def test_checksum_coverage_and_tamper_detection(self):
         with tempfile.TemporaryDirectory(prefix="release-checksum-") as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             (root / "module.py").write_text("print('ok')\n", encoding="utf-8")
             (root / "docs").mkdir()
             (root / "docs" / "guide.md").write_text("guide\n", encoding="utf-8")
@@ -221,6 +250,158 @@ class ReleaseBuilderTest(unittest.TestCase):
                 self.skipTest("symlinks are unavailable on this runner")
             with self.assertRaises(release.ReleaseError):
                 release.regular_files(root)
+
+    def test_source_file_symlink_swap_after_validation_is_rejected(self):
+        old_root = release.PROJECT_ROOT
+        with tempfile.TemporaryDirectory(prefix="release-source-race-") as temporary:
+            root = Path(temporary).resolve()
+            source_dir = root / "src"
+            source_dir.mkdir()
+            source = source_dir / "source.py"
+            source.write_text("public source\n", encoding="utf-8")
+            outside = root / "outside.txt"
+            outside.write_text("sentinel secret\n", encoding="utf-8")
+            release.PROJECT_ROOT = root
+            try:
+                candidate = release._source_candidate(source, "src/source.py")
+                real_open = os.open
+                swapped = False
+
+                def swap_before_open(path, *args, **kwargs):
+                    nonlocal swapped
+                    if path == "source.py" and kwargs.get("dir_fd") is not None and not swapped:
+                        source.unlink()
+                        try:
+                            source.symlink_to(outside)
+                        except (OSError, NotImplementedError) as exc:
+                            self.skipTest(f"symlink creation unavailable: {exc}")
+                        swapped = True
+                    return real_open(path, *args, **kwargs)
+
+                with mock.patch.object(release.os, "open", side_effect=swap_before_open):
+                    with self.assertRaises(release.ReleaseError):
+                        release._snapshot_source(candidate, "src/source.py")
+                self.assertTrue(swapped)
+                self.assertEqual(outside.read_text(encoding="utf-8"), "sentinel secret\n")
+            finally:
+                release.PROJECT_ROOT = old_root
+
+    def test_source_parent_directory_symlink_swap_is_rejected(self):
+        old_root = release.PROJECT_ROOT
+        with tempfile.TemporaryDirectory(prefix="release-parent-race-") as temporary:
+            root = Path(temporary).resolve()
+            source_dir = root / "src"
+            source_dir.mkdir()
+            source = source_dir / "source.py"
+            source.write_text("public source\n", encoding="utf-8")
+            outside_dir = root / "outside"
+            outside_dir.mkdir()
+            outside = outside_dir / "source.py"
+            outside.write_text("sentinel secret\n", encoding="utf-8")
+            release.PROJECT_ROOT = root
+            try:
+                candidate = release._source_candidate(source, "src/source.py")
+                real_open = os.open
+                swapped = False
+
+                def swap_parent_before_open(path, *args, **kwargs):
+                    nonlocal swapped
+                    if path == "src" and kwargs.get("dir_fd") is not None and not swapped:
+                        source_dir.rename(root / "src-original")
+                        try:
+                            source_dir.symlink_to(outside_dir, target_is_directory=True)
+                        except (OSError, NotImplementedError) as exc:
+                            (root / "src-original").rename(source_dir)
+                            self.skipTest(f"symlink creation unavailable: {exc}")
+                        swapped = True
+                    return real_open(path, *args, **kwargs)
+
+                with mock.patch.object(release.os, "open", side_effect=swap_parent_before_open):
+                    with self.assertRaises(release.ReleaseError):
+                        release._snapshot_source(candidate, "src/source.py")
+                self.assertTrue(swapped)
+                self.assertEqual(outside.read_text(encoding="utf-8"), "sentinel secret\n")
+                (root / "src").unlink()
+                (root / "src-original").rename(source_dir)
+            finally:
+                release.PROJECT_ROOT = old_root
+
+    def test_external_checksum_target_symlink_race_is_rejected(self):
+        with tempfile.TemporaryDirectory(prefix="release-checksum-race-") as temporary:
+            root = Path(temporary).resolve()
+            output = root / "out"
+            output.mkdir()
+            archive = output / "package.zip"
+            archive.write_bytes(b"synthetic package bytes")
+            outside = root / "outside.txt"
+            outside.write_text("sentinel remains\n", encoding="utf-8")
+            real_open = os.open
+            swapped = False
+
+            def race_checksum_target(path, *args, **kwargs):
+                nonlocal swapped
+                if path == "SHA256SUMS" and kwargs.get("dir_fd") is not None and not swapped:
+                    try:
+                        (output / "SHA256SUMS").symlink_to(outside)
+                    except (OSError, NotImplementedError) as exc:
+                        self.skipTest(f"symlink creation unavailable: {exc}")
+                    swapped = True
+                return real_open(path, *args, **kwargs)
+
+            with mock.patch.object(release.os, "open", side_effect=race_checksum_target):
+                with self.assertRaises(release.ReleaseError):
+                    release.write_external_checksums(output, [archive])
+            self.assertTrue(swapped)
+            self.assertEqual(outside.read_text(encoding="utf-8"), "sentinel remains\n")
+            self.assertTrue((output / "SHA256SUMS").is_symlink())
+
+    def test_archive_payload_must_match_manifest_source_even_when_self_checksummed(self):
+        manifest = release.load_manifest()
+        with tempfile.TemporaryDirectory(prefix="release-archive-bound-") as temporary:
+            output = Path(temporary).resolve()
+            archive, _external = release.build_release(output)
+            with zipfile.ZipFile(archive) as package:
+                payload_names = [
+                    name for name in package.namelist()
+                    if name.endswith(".py") and "/" in name
+                ]
+            missing_target = payload_names[0]
+            modified_target = next(
+                name for name in payload_names if name.endswith("/codex-adaptive-agents.py")
+            )
+
+            missing = output / "missing.zip"
+
+            def remove_member(entries, _root):
+                del entries[missing_target]
+
+            rewrite_archive(archive, missing, remove_member)
+            with self.assertRaisesRegex(release.ReleaseError, "payload differs from source"):
+                release.validate_archive(missing, manifest)
+
+            extra = output / "extra.zip"
+
+            def add_member(entries, root):
+                # tests_python/ is an allowed payload directory; it must not
+                # become a container for an unlisted private file.
+                entries[root + "/tests_python/private-container.txt"] = (
+                    stat.S_IFREG | 0o644,
+                    b"self-checksummed extra\n",
+                )
+
+            rewrite_archive(archive, extra, add_member)
+            with self.assertRaisesRegex(release.ReleaseError, "payload differs from source"):
+                release.validate_archive(extra, manifest)
+
+            tampered = output / "tampered.zip"
+
+            def alter_member(entries, _root):
+                mode, data = entries[modified_target]
+                entries[modified_target] = (mode, data + b"# self-checksummed alteration\n")
+
+            rewrite_archive(archive, tampered, alter_member)
+            with self.assertRaisesRegex(release.ReleaseError, "current source"):
+                release.validate_archive(tampered, manifest)
 
 
 if __name__ == "__main__":
