@@ -14,6 +14,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from types import SimpleNamespace
 from unittest import mock
 
 sys.dont_write_bytecode = True
@@ -88,6 +89,19 @@ def rewrite_archive(source: Path, target: Path, transform) -> None:
             package.writestr(release._zip_info(name, mode), data)
 
 
+def release_path_modes() -> list[bool]:
+    """Keep native descriptor-relative coverage and simulate Windows fallback on POSIX."""
+    if os.name == "nt":
+        return [False]
+    return list(dict.fromkeys((release.HAS_DIR_FD_OPEN, False)))
+
+
+def open_target_matches(path, kwargs, relative_name: str, absolute_path: Path) -> bool:
+    if kwargs.get("dir_fd") is not None:
+        return path == relative_name
+    return Path(path) == absolute_path
+
+
 class ReleaseBuilderTest(unittest.TestCase):
     def test_safe_paths_reject_traversal_and_platform_paths(self):
         for value in ("", ".", "..", "../secret", "a/../b", "/absolute", "C:/absolute",
@@ -109,6 +123,151 @@ class ReleaseBuilderTest(unittest.TestCase):
             (root / "module.py").write_text("print('changed')\n", encoding="utf-8")
             with self.assertRaises(release.ReleaseError):
                 release.verify_package_checksums(root)
+
+    def test_windows_path_and_handle_stat_compare_stable_identity_without_ctime_aliases(self):
+        def info(*, dev=7, inode=41, mode=None, size=5, mtime=80, ctime=100, birth=90):
+            return SimpleNamespace(
+                st_dev=dev, st_ino=inode, st_mode=stat.S_IFREG | 0o644 if mode is None else mode,
+                st_size=size, st_mtime=mtime / 1_000_000_000,
+                st_ctime=ctime / 1_000_000_000, st_mtime_ns=mtime,
+                st_ctime_ns=ctime, st_birthtime_ns=birth,
+                st_file_attributes=0,
+            )
+
+        path_info = info(ctime=100, birth=90)
+        handle_info = info(ctime=200, birth=90)
+        changed_fields = (
+            ("device", {"dev": 8}),
+            ("file ID", {"inode": 42}),
+            ("mode", {"mode": stat.S_IFREG | 0o600}),
+            ("size", {"size": 6}),
+            ("modification time", {"mtime": 81}),
+            ("creation time", {"birth": 91}),
+        )
+        with mock.patch.object(release, "WINDOWS_STAT", True), \
+                mock.patch.object(release, "HAS_DIR_FD_OPEN", False):
+            self.assertTrue(release._path_handle_identity_matches(path_info, handle_info))
+            for label, changes in changed_fields:
+                with self.subTest(field=label):
+                    changed = {"ctime": 200, "birth": 90}
+                    changed.update(changes)
+                    self.assertFalse(release._path_handle_identity_matches(
+                        path_info, info(**changed)
+                    ))
+
+        # Windows stat semantics and descriptor-relative-open availability are
+        # independent: POSIX remains strict even when it uses the path fallback.
+        with mock.patch.object(release, "WINDOWS_STAT", False), \
+                mock.patch.object(release, "HAS_DIR_FD_OPEN", False):
+            self.assertFalse(release._path_handle_identity_matches(path_info, handle_info))
+
+        # Same-kind path/path and handle/handle snapshots retain full ctime checks.
+        self.assertNotEqual(release._file_identity(path_info), release._file_identity(handle_info))
+        self.assertNotEqual(release._file_identity(handle_info), release._file_identity(info(ctime=201, birth=90)))
+
+    def test_windows_stat_ctime_difference_does_not_reject_secure_file_read(self):
+        with tempfile.TemporaryDirectory(prefix="release-windows-stat-sim-") as temporary:
+            path = Path(temporary).resolve() / "source.py"
+            path.write_bytes(b"stable source\n")
+            real_path_lstat = Path.lstat
+            real_fstat = os.fstat
+            path_lstat_calls = 0
+
+            def result_with_windows_fields(info, *, handle):
+                values = dict(
+                    st_dev=info.st_dev, st_ino=info.st_ino, st_mode=info.st_mode,
+                    st_size=info.st_size, st_mtime_ns=info.st_mtime_ns,
+                    st_mtime=info.st_mtime,
+                    st_ctime=info.st_ctime,
+                    st_ctime_ns=info.st_ctime_ns + (1000 if handle else 0),
+                    st_file_attributes=getattr(info, "st_file_attributes", 0),
+                    st_birthtime_ns=info.st_ctime_ns,
+                )
+                return SimpleNamespace(**values)
+
+            def simulated_path_lstat(target):
+                nonlocal path_lstat_calls
+                info = real_path_lstat(target)
+                if Path(target) == path:
+                    path_lstat_calls += 1
+                    return result_with_windows_fields(info, handle=False)
+                return info
+
+            calls_before = path_lstat_calls
+            with mock.patch.object(release, "HAS_DIR_FD_OPEN", False), \
+                    mock.patch.object(release, "WINDOWS_STAT", True), \
+                    mock.patch.object(Path, "lstat", new=simulated_path_lstat), \
+                    mock.patch.object(release.os, "fstat", side_effect=lambda value: result_with_windows_fields(
+                        real_fstat(value), handle=True)):
+                self.assertEqual(release._read_regular_file(path), b"stable source\n")
+            self.assertGreater(path_lstat_calls, calls_before, "Windows path-stat simulation was not injected")
+
+            def mismatched_file_id(fd):
+                info = result_with_windows_fields(real_fstat(fd), handle=True)
+                info.st_ino += 1
+                return info
+
+            calls_before = path_lstat_calls
+            with mock.patch.object(release, "HAS_DIR_FD_OPEN", False), \
+                    mock.patch.object(release, "WINDOWS_STAT", True), \
+                    mock.patch.object(Path, "lstat", new=simulated_path_lstat), \
+                    mock.patch.object(release.os, "fstat", side_effect=mismatched_file_id):
+                with self.assertRaisesRegex(release.ReleaseError, "changed during secure open"):
+                    release._read_regular_file(path)
+            self.assertGreater(path_lstat_calls, calls_before, "file-ID case did not use the Windows path-stat simulation")
+
+            calls = 0
+
+            def mutate_fd_ctime_only(fd):
+                nonlocal calls
+                calls += 1
+                info = real_fstat(fd)
+                if calls == 2:
+                    return result_with_windows_fields(info, handle=True)
+                return result_with_windows_fields(info, handle=False)
+
+            calls_before = path_lstat_calls
+            with mock.patch.object(release, "HAS_DIR_FD_OPEN", False), \
+                    mock.patch.object(release, "WINDOWS_STAT", True), \
+                    mock.patch.object(Path, "lstat", new=simulated_path_lstat), \
+                    mock.patch.object(release.os, "fstat", side_effect=mutate_fd_ctime_only):
+                with self.assertRaisesRegex(release.ReleaseError, "changed while reading"):
+                    release._read_regular_file(path)
+            self.assertGreater(path_lstat_calls, calls_before, "mid-read case did not use the Windows path-stat simulation")
+
+            calls = 0
+
+            def mutate_after_read(fd):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    path.write_bytes(b"changed source\n")
+                return real_fstat(fd)
+
+            with mock.patch.object(release, "HAS_DIR_FD_OPEN", False), \
+                    mock.patch.object(release.os, "fstat", side_effect=mutate_after_read):
+                with self.assertRaisesRegex(release.ReleaseError, "changed while reading"):
+                    release._read_regular_file(path)
+
+    def test_windows_stat_semantics_do_not_relax_path_path_identity(self):
+        with tempfile.TemporaryDirectory(prefix="release-path-stat-sim-") as temporary:
+            root = Path(temporary).resolve()
+            path = root / "source.py"
+            path.write_bytes(b"stable source\n")
+            original = path.lstat()
+            changed_ctime = SimpleNamespace(
+                st_dev=original.st_dev, st_ino=original.st_ino, st_mode=original.st_mode,
+                st_size=original.st_size, st_mtime=original.st_mtime,
+                st_mtime_ns=original.st_mtime_ns, st_ctime=original.st_ctime,
+                st_ctime_ns=original.st_ctime_ns + 1,
+                st_file_attributes=getattr(original, "st_file_attributes", 0),
+            )
+            with mock.patch.object(release, "PROJECT_ROOT", root), \
+                    mock.patch.object(release, "HAS_DIR_FD_OPEN", False), \
+                    mock.patch.object(release, "WINDOWS_STAT", True), \
+                    mock.patch.object(release, "_source_lstat", return_value=changed_ctime):
+                with self.assertRaisesRegex(release.ReleaseError, "changed during validation"):
+                    release._source_candidate(path, "source.py")
 
     def test_public_markdown_links_are_checked(self):
         with tempfile.TemporaryDirectory(prefix="release-links-") as temporary:
@@ -252,108 +411,114 @@ class ReleaseBuilderTest(unittest.TestCase):
                 release.regular_files(root)
 
     def test_source_file_symlink_swap_after_validation_is_rejected(self):
-        old_root = release.PROJECT_ROOT
-        with tempfile.TemporaryDirectory(prefix="release-source-race-") as temporary:
-            root = Path(temporary).resolve()
-            source_dir = root / "src"
-            source_dir.mkdir()
-            source = source_dir / "source.py"
-            source.write_text("public source\n", encoding="utf-8")
-            outside = root / "outside.txt"
-            outside.write_text("sentinel secret\n", encoding="utf-8")
-            release.PROJECT_ROOT = root
-            try:
-                candidate = release._source_candidate(source, "src/source.py")
-                real_open = os.open
-                swapped = False
+        for has_dir_fd in release_path_modes():
+            with self.subTest(dir_fd=has_dir_fd), tempfile.TemporaryDirectory(prefix="release-source-race-") as temporary:
+                old_root = release.PROJECT_ROOT
+                root = Path(temporary).resolve()
+                source_dir = root / "src"
+                source_dir.mkdir()
+                source = source_dir / "source.py"
+                source.write_text("public source\n", encoding="utf-8")
+                outside = root / "outside.txt"
+                outside.write_text("sentinel secret\n", encoding="utf-8")
+                release.PROJECT_ROOT = root
+                try:
+                    with mock.patch.object(release, "HAS_DIR_FD_OPEN", has_dir_fd):
+                        candidate = release._source_candidate(source, "src/source.py")
+                        real_open = os.open
+                        swapped = False
 
-                def swap_before_open(path, *args, **kwargs):
-                    nonlocal swapped
-                    if path == "source.py" and kwargs.get("dir_fd") is not None and not swapped:
-                        source.unlink()
-                        try:
-                            source.symlink_to(outside)
-                        except (OSError, NotImplementedError) as exc:
-                            self.skipTest(f"symlink creation unavailable: {exc}")
-                        swapped = True
-                    return real_open(path, *args, **kwargs)
+                        def swap_before_open(path, *args, **kwargs):
+                            nonlocal swapped
+                            if open_target_matches(path, kwargs, "source.py", source) and not swapped:
+                                source.unlink()
+                                try:
+                                    source.symlink_to(outside)
+                                except (OSError, NotImplementedError) as exc:
+                                    self.skipTest(f"symlink creation unavailable: {exc}")
+                                swapped = True
+                            return real_open(path, *args, **kwargs)
 
-                with mock.patch.object(release.os, "open", side_effect=swap_before_open):
-                    with self.assertRaises(release.ReleaseError):
-                        release._snapshot_source(candidate, "src/source.py")
-                self.assertTrue(swapped)
-                self.assertEqual(outside.read_text(encoding="utf-8"), "sentinel secret\n")
-            finally:
-                release.PROJECT_ROOT = old_root
+                        with mock.patch.object(release.os, "open", side_effect=swap_before_open):
+                            with self.assertRaises(release.ReleaseError):
+                                release._snapshot_source(candidate, "src/source.py")
+                        self.assertTrue(swapped)
+                        self.assertEqual(outside.read_text(encoding="utf-8"), "sentinel secret\n")
+                finally:
+                    release.PROJECT_ROOT = old_root
 
     def test_source_parent_directory_symlink_swap_is_rejected(self):
-        old_root = release.PROJECT_ROOT
-        with tempfile.TemporaryDirectory(prefix="release-parent-race-") as temporary:
-            root = Path(temporary).resolve()
-            source_dir = root / "src"
-            source_dir.mkdir()
-            source = source_dir / "source.py"
-            source.write_text("public source\n", encoding="utf-8")
-            outside_dir = root / "outside"
-            outside_dir.mkdir()
-            outside = outside_dir / "source.py"
-            outside.write_text("sentinel secret\n", encoding="utf-8")
-            release.PROJECT_ROOT = root
-            try:
-                candidate = release._source_candidate(source, "src/source.py")
+        for has_dir_fd in release_path_modes():
+            with self.subTest(dir_fd=has_dir_fd), tempfile.TemporaryDirectory(prefix="release-parent-race-") as temporary:
+                old_root = release.PROJECT_ROOT
+                root = Path(temporary).resolve()
+                source_dir = root / "src"
+                source_dir.mkdir()
+                source = source_dir / "source.py"
+                source.write_text("public source\n", encoding="utf-8")
+                outside_dir = root / "outside"
+                outside_dir.mkdir()
+                outside = outside_dir / "source.py"
+                outside.write_text("sentinel secret\n", encoding="utf-8")
+                release.PROJECT_ROOT = root
+                try:
+                    with mock.patch.object(release, "HAS_DIR_FD_OPEN", has_dir_fd):
+                        candidate = release._source_candidate(source, "src/source.py")
+                        real_open = os.open
+                        swapped = False
+
+                        def swap_parent_before_open(path, *args, **kwargs):
+                            nonlocal swapped
+                            if open_target_matches(path, kwargs, "source.py", source) and not swapped:
+                                source_dir.rename(root / "src-original")
+                                try:
+                                    source_dir.symlink_to(outside_dir, target_is_directory=True)
+                                except (OSError, NotImplementedError) as exc:
+                                    (root / "src-original").rename(source_dir)
+                                    self.skipTest(f"symlink creation unavailable: {exc}")
+                                swapped = True
+                            return real_open(path, *args, **kwargs)
+
+                        with mock.patch.object(release.os, "open", side_effect=swap_parent_before_open):
+                            with self.assertRaises(release.ReleaseError):
+                                release._snapshot_source(candidate, "src/source.py")
+                        self.assertTrue(swapped)
+                        self.assertEqual(outside.read_text(encoding="utf-8"), "sentinel secret\n")
+                        (root / "src").unlink()
+                        (root / "src-original").rename(source_dir)
+                finally:
+                    release.PROJECT_ROOT = old_root
+
+    def test_external_checksum_target_symlink_race_is_rejected(self):
+        for has_dir_fd in release_path_modes():
+            with self.subTest(dir_fd=has_dir_fd), tempfile.TemporaryDirectory(prefix="release-checksum-race-") as temporary:
+                root = Path(temporary).resolve()
+                output = root / "out"
+                output.mkdir()
+                archive = output / "package.zip"
+                archive.write_bytes(b"synthetic package bytes")
+                outside = root / "outside.txt"
+                outside.write_text("sentinel remains\n", encoding="utf-8")
                 real_open = os.open
                 swapped = False
 
-                def swap_parent_before_open(path, *args, **kwargs):
+                def race_checksum_target(path, *args, **kwargs):
                     nonlocal swapped
-                    if path == "src" and kwargs.get("dir_fd") is not None and not swapped:
-                        source_dir.rename(root / "src-original")
+                    if open_target_matches(path, kwargs, "SHA256SUMS", output / "SHA256SUMS") and not swapped:
                         try:
-                            source_dir.symlink_to(outside_dir, target_is_directory=True)
+                            (output / "SHA256SUMS").symlink_to(outside)
                         except (OSError, NotImplementedError) as exc:
-                            (root / "src-original").rename(source_dir)
                             self.skipTest(f"symlink creation unavailable: {exc}")
                         swapped = True
                     return real_open(path, *args, **kwargs)
 
-                with mock.patch.object(release.os, "open", side_effect=swap_parent_before_open):
+                with mock.patch.object(release, "HAS_DIR_FD_OPEN", has_dir_fd), \
+                        mock.patch.object(release.os, "open", side_effect=race_checksum_target):
                     with self.assertRaises(release.ReleaseError):
-                        release._snapshot_source(candidate, "src/source.py")
+                        release.write_external_checksums(output, [archive])
                 self.assertTrue(swapped)
-                self.assertEqual(outside.read_text(encoding="utf-8"), "sentinel secret\n")
-                (root / "src").unlink()
-                (root / "src-original").rename(source_dir)
-            finally:
-                release.PROJECT_ROOT = old_root
-
-    def test_external_checksum_target_symlink_race_is_rejected(self):
-        with tempfile.TemporaryDirectory(prefix="release-checksum-race-") as temporary:
-            root = Path(temporary).resolve()
-            output = root / "out"
-            output.mkdir()
-            archive = output / "package.zip"
-            archive.write_bytes(b"synthetic package bytes")
-            outside = root / "outside.txt"
-            outside.write_text("sentinel remains\n", encoding="utf-8")
-            real_open = os.open
-            swapped = False
-
-            def race_checksum_target(path, *args, **kwargs):
-                nonlocal swapped
-                if path == "SHA256SUMS" and kwargs.get("dir_fd") is not None and not swapped:
-                    try:
-                        (output / "SHA256SUMS").symlink_to(outside)
-                    except (OSError, NotImplementedError) as exc:
-                        self.skipTest(f"symlink creation unavailable: {exc}")
-                    swapped = True
-                return real_open(path, *args, **kwargs)
-
-            with mock.patch.object(release.os, "open", side_effect=race_checksum_target):
-                with self.assertRaises(release.ReleaseError):
-                    release.write_external_checksums(output, [archive])
-            self.assertTrue(swapped)
-            self.assertEqual(outside.read_text(encoding="utf-8"), "sentinel remains\n")
-            self.assertTrue((output / "SHA256SUMS").is_symlink())
+                self.assertEqual(outside.read_text(encoding="utf-8"), "sentinel remains\n")
+                self.assertTrue((output / "SHA256SUMS").is_symlink())
 
     def test_archive_payload_must_match_manifest_source_even_when_self_checksummed(self):
         manifest = release.load_manifest()

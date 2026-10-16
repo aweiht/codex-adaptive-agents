@@ -33,7 +33,7 @@ class CLITests(unittest.TestCase):
                     patch.object(cli, 'read', return_value=b''), \
                     patch.object(install, 'desired', return_value={}), \
                     patch.object(install, 'transform', return_value=(b'', [])), \
-                    patch.object(cli.shutil, 'which', return_value='/normal/PATH/codex') as which, \
+                    patch.object(cli.shutil, 'which', return_value=os.path.abspath('/normal/PATH/codex')) as which, \
                     patch.object(policy, 'doctor_capabilities', return_value={'status': 'READY'}) as capabilities, \
                     patch.object(policy, 'cached_select', return_value={'role': 'adaptive_luna_xhigh',
                           'status': 'fallback'}), \
@@ -43,7 +43,7 @@ class CLITests(unittest.TestCase):
 
         self.assertEqual(result['status'], 'READY_FALLBACK')
         which.assert_called_once_with('codex')
-        capabilities.assert_called_once_with(home, '/normal/PATH/codex')
+        capabilities.assert_called_once_with(home, os.path.abspath('/normal/PATH/codex'))
         self.assertFalse(marker.exists())
 
     def test_resolve_codex_preserves_explicit_path_and_uses_path_by_default(self):
@@ -53,12 +53,14 @@ class CLITests(unittest.TestCase):
             resource.mkdir(parents=True)
             (resource / 'capabilities.json').write_text(
                 json.dumps({'schema': 2, 'codex': '/untrusted/from/snapshot'}), encoding='utf-8')
+            path_result = os.path.abspath('/normal/PATH/codex')
+            explicit_result = os.path.abspath('/known/explicit/codex')
             with patch.object(cli.shutil, 'which', side_effect=lambda value: {
-                    'codex': '/normal/PATH/codex', '/known/explicit/codex': '/known/explicit/codex'
+                    'codex': path_result, '/known/explicit/codex': explicit_result
             }.get(value)) as which:
-                self.assertEqual(cli.resolve_codex(home), '/normal/PATH/codex')
+                self.assertEqual(cli.resolve_codex(home), path_result)
                 self.assertEqual(cli.resolve_codex(home, '/known/explicit/codex'),
-                                 '/known/explicit/codex')
+                                 explicit_result)
         self.assertEqual([call.args[0] for call in which.call_args_list],
                          ['codex', '/known/explicit/codex'])
 

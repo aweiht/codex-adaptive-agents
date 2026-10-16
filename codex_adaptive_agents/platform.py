@@ -78,17 +78,76 @@ def atomic(path, data, mode=0o600):
     os.replace(temp, path)
 
 
+def _initialize_windows_lock_byte(handle):
+    handle.write(b"\0")
+    handle.flush()
+
+
+def _open_existing_windows_lock_file(path, flags, mode, deadline):
+    while True:
+        try:
+            fd = os.open(path, flags, mode)
+        except PermissionError as error:
+            # The exclusive creator closes its handle before handing the file
+            # to CRT locking. Retry only Windows sharing violations in that
+            # short handoff window; ACL and other permission errors stay fatal.
+            if getattr(error, "winerror", None) not in {32, 33} or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
+            continue
+        try:
+            handle = os.fdopen(fd, "r+b", buffering=0)
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
+        try:
+            size = os.fstat(handle.fileno()).st_size
+        except BaseException:
+            try:
+                handle.close()
+            except OSError:
+                pass
+            raise
+        if size > 0:
+            return handle
+        handle.close()
+        if time.monotonic() >= deadline:
+            raise RuntimeError("lock file initialization timed out")
+        # Another process has created the pathname but has not published the
+        # stable byte yet. It alone owns initialization.
+        time.sleep(0.01)
+
+
+def _open_windows_lock_file(path, flags, mode, timeout):
+    """Create the CRT lock byte once, or wait for its creator to finish."""
+    deadline = time.monotonic() + timeout
+    try:
+        fd = os.open(path, flags | os.O_EXCL, mode)
+    except FileExistsError:
+        return _open_existing_windows_lock_file(path, flags, mode, deadline), deadline
+
+    # O_EXCL chooses exactly one initializer. Close its exclusive-create handle
+    # before opening the stable file for the byte-range lock.
+    with os.fdopen(fd, "r+b", buffering=0) as handle:
+        _initialize_windows_lock_byte(handle)
+    return _open_existing_windows_lock_file(path, flags, mode, deadline), deadline
+
+
 @contextmanager
 def file_lock(path, timeout=5):
     path = Path(path)
     safe(path)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
-    with os.fdopen(os.open(path, flags, 0o600), "r+b", buffering=0) as handle:
-        # Windows byte-range locks require a stable byte. Never truncate a lock.
-        if os.fstat(handle.fileno()).st_size == 0:
-            handle.write(b"\0")
+    if os.name == "nt":
+        handle, deadline = _open_windows_lock_file(path, flags, 0o600, timeout)
+    else:
+        handle = os.fdopen(os.open(path, flags, 0o600), "r+b", buffering=0)
         deadline = time.monotonic() + timeout
+    with handle:
         while True:
             try:
                 if os.name == "nt":

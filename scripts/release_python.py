@@ -38,6 +38,7 @@ MARKDOWN_LINK_RE = re.compile(r"(?<!!)\[[^\]\n]+\]\(([^)\n]+)\)")
 CHECKSUM_LINE_RE = re.compile(r"^([0-9a-fA-F]{64})  (.+)$")
 REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 HAS_DIR_FD_OPEN = os.open in getattr(os, "supports_dir_fd", set())
+WINDOWS_STAT = os.name == "nt"
 
 
 @dataclass(frozen=True)
@@ -141,6 +142,37 @@ def _file_identity(info: os.stat_result) -> tuple[int, int, int, int, int, int]:
         int(getattr(info, "st_mtime_ns", int(info.st_mtime * 1_000_000_000))),
         int(getattr(info, "st_ctime_ns", int(info.st_ctime * 1_000_000_000))),
     )
+
+
+def _path_handle_identity_matches(path_info: os.stat_result, handle_info: os.stat_result) -> bool:
+    """Compare a checked path with its opened handle across Windows stat APIs.
+
+    Windows may report different ``st_ctime_ns`` values from path stat and
+    ``fstat`` even for the same file. When both APIs expose creation time, use
+    that stable timestamp alongside the file index and content metadata.
+    POSIX keeps the full identity check, including when descriptor-relative
+    open is unavailable. Path/path and handle/handle comparisons always use
+    the full identity.
+    """
+    if not WINDOWS_STAT:
+        return _file_identity(path_info) == _file_identity(handle_info)
+
+    path_birth = getattr(path_info, "st_birthtime_ns", None)
+    handle_birth = getattr(handle_info, "st_birthtime_ns", None)
+    if path_birth is None and handle_birth is None:
+        timestamp_matches = int(path_info.st_ctime_ns) == int(handle_info.st_ctime_ns)
+    elif path_birth is not None and handle_birth is not None:
+        timestamp_matches = int(path_birth) == int(handle_birth)
+    else:
+        # The file ID still binds the path and handle. A missing creation-time
+        # field cannot be substituted with Windows ctime, whose meaning can
+        # differ between the two APIs.
+        timestamp_matches = True
+
+    stable_fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns")
+    return (timestamp_matches and
+            all(int(getattr(path_info, field)) == int(getattr(handle_info, field))
+                for field in stable_fields))
 
 
 def _absolute(path: Path) -> Path:
@@ -262,7 +294,7 @@ def _open_regular_file(
             fd = os.open(path, flags)
         opened_info = os.fstat(fd)
         if (_is_link_or_reparse(opened_info) or not stat.S_ISREG(opened_info.st_mode)
-                or _file_identity(opened_info) != _file_identity(expected_info)):
+                or not _path_handle_identity_matches(expected_info, opened_info)):
             raise ReleaseError(f"source file changed during secure open: {path}")
         if opened_parent != parent_before or _checked_directory_chain(parent) != parent_before:
             raise ReleaseError(f"source parent changed during secure open: {path}")
@@ -703,7 +735,7 @@ def _write_new_file_exclusively(directory: Path, name: str, writer, *, mode: int
     flags = (os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
              | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
     fd: int | None = None
-    created_identity: tuple[int, int, int, int, int, int] | None = None
+    created_info: os.stat_result | None = None
     created_inode: tuple[int, int] | None = None
     succeeded = False
     try:
@@ -714,7 +746,7 @@ def _write_new_file_exclusively(directory: Path, name: str, writer, *, mode: int
         initial_info = os.fstat(fd)
         if _is_link_or_reparse(initial_info) or not stat.S_ISREG(initial_info.st_mode):
             raise ReleaseError(f"exclusive output is not a regular file: {target}")
-        created_identity = _file_identity(initial_info)
+        created_info = initial_info
         created_inode = (int(initial_info.st_dev), int(initial_info.st_ino))
         os.fchmod(fd, mode) if hasattr(os, "fchmod") else None
         with os.fdopen(fd, "w+b") as handle:
@@ -727,7 +759,7 @@ def _write_new_file_exclusively(directory: Path, name: str, writer, *, mode: int
                 raise ReleaseError(f"exclusive output changed type while writing: {target}")
             if (final_fd_info.st_dev, final_fd_info.st_ino) != (initial_info.st_dev, initial_info.st_ino):
                 raise ReleaseError(f"exclusive output identity changed while writing: {target}")
-            created_identity = _file_identity(final_fd_info)
+            created_info = final_fd_info
 
         if directory_fd is not None:
             final_info = os.stat(safe_name, dir_fd=directory_fd, follow_symlinks=False)
@@ -736,7 +768,8 @@ def _write_new_file_exclusively(directory: Path, name: str, writer, *, mode: int
                 raise ReleaseError(f"output directory changed while writing: {directory}")
             final_info = target.lstat()
         if (_is_link_or_reparse(final_info) or not stat.S_ISREG(final_info.st_mode)
-                or _file_identity(final_info) != created_identity):
+                or created_info is None
+                or not _path_handle_identity_matches(final_info, created_info)):
             raise ReleaseError(f"exclusive output path changed while writing: {target}")
         succeeded = True
         return target

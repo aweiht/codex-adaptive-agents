@@ -27,6 +27,15 @@
 - Normalize oversized JSON integer conversion errors as policy failures so
   invalid caches remain byte-preserved in normal mode and explicit refresh can
   repair them without changing Python's integer conversion limit.
+- Make Windows lock-byte initialization exclusive across concurrent creators,
+  wait boundedly for initialization, and retry only transient Windows sharing
+  or lock violations while preserving permission errors.
+- Compare Windows release path and open-handle identity using file IDs, size,
+  modification time, and creation time when available; retain full identity
+  checks for path/path and handle/handle comparisons and cover both safe-open
+  routes with symlink-swap regressions.
+- Normalize CLI path-resolution test fixtures for platform-specific absolute
+  path spelling.
 
 ## 0.7.0 — Previous source snapshot
 

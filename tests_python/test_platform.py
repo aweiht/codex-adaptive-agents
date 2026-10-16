@@ -3,11 +3,13 @@ from pathlib import Path
 import sys
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
 
 from codex_adaptive_agents import platform as p
+from codex_adaptive_agents import platform
 
 
 class PlatformTests(unittest.TestCase):
@@ -215,5 +217,192 @@ class PlatformTests(unittest.TestCase):
             self.assertFalse(target.exists())
 
 
-if __name__ == '__main__':
+class WindowsLockInitializationTests(unittest.TestCase):
+    def setUp(self):
+        self._temporary = tempfile.TemporaryDirectory(prefix="codex-adaptive-agents-lock-")
+        self.path = Path(self._temporary.name, "run.lock").resolve()
+        self.flags = os.O_RDWR | os.O_CREAT
+
+    def tearDown(self):
+        self._temporary.cleanup()
+
+    @staticmethod
+    def _permission_error(winerror):
+        error = PermissionError("simulated Windows open failure")
+        error.winerror = winerror
+        return error
+
+    def test_competing_creators_initialize_once_and_waiter_opens_after_byte_exists(self):
+        real_open = platform.os.open
+        real_fstat = platform.os.fstat
+        creator_opened = threading.Event()
+        allow_creator = threading.Event()
+        empty_file_seen = threading.Event()
+        gate_once = threading.Lock()
+        gate_used = False
+        initialized = []
+        initialized_lock = threading.Lock()
+        handles = []
+        errors = []
+
+        def gated_open(path, flags, mode=0o777):
+            nonlocal gate_used
+            fd = real_open(path, flags, mode)
+            should_gate = False
+            if flags & os.O_EXCL:
+                with gate_once:
+                    if not gate_used:
+                        gate_used = True
+                        should_gate = True
+            if should_gate:
+                creator_opened.set()
+                if not allow_creator.wait(3):
+                    raise RuntimeError("test did not release exclusive creator")
+            return fd
+
+        def observed_fstat(fd):
+            result = real_fstat(fd)
+            if result.st_size == 0:
+                empty_file_seen.set()
+            return result
+
+        real_initialize = platform._initialize_windows_lock_byte
+
+        def counted_initialize(handle):
+            with initialized_lock:
+                initialized.append(1)
+            return real_initialize(handle)
+
+        def open_lock():
+            try:
+                handle, _ = platform._open_windows_lock_file(self.path, self.flags, 0o600, 2)
+                handles.append(handle)
+            except BaseException as error:
+                errors.append(error)
+
+        with patch.object(platform.os, "open", side_effect=gated_open), \
+                patch.object(platform.os, "fstat", side_effect=observed_fstat), \
+                patch.object(platform, "_initialize_windows_lock_byte", side_effect=counted_initialize):
+            creator = threading.Thread(target=open_lock)
+            waiter = threading.Thread(target=open_lock)
+            try:
+                creator.start()
+                self.assertTrue(creator_opened.wait(2), "exclusive creator did not create the path")
+                waiter.start()
+                self.assertTrue(empty_file_seen.wait(2), "waiter did not observe in-progress initialization")
+                self.assertTrue(waiter.is_alive(), "waiter must wait while the lock file has no byte")
+            finally:
+                allow_creator.set()
+                creator.join(3)
+                waiter.join(3)
+
+        self.assertFalse(creator.is_alive(), "creator thread did not finish")
+        self.assertFalse(waiter.is_alive(), "waiter thread did not finish")
+        self.assertEqual(errors, [])
+        self.assertEqual(len(handles), 2)
+        self.assertEqual(initialized, [1])
+        self.assertEqual(self.path.read_bytes(), b"\0")
+        for handle in handles:
+            handle.close()
+
+    def test_creator_failure_leaves_empty_file_and_waiter_times_out(self):
+        with patch.object(platform, "_initialize_windows_lock_byte", side_effect=OSError("write failed")):
+            with self.assertRaisesRegex(OSError, "write failed"):
+                platform._open_windows_lock_file(self.path, self.flags, 0o600, 1)
+
+        self.assertEqual(self.path.read_bytes(), b"")
+        with self.assertRaisesRegex(RuntimeError, "initialization timed out"):
+            platform._open_windows_lock_file(self.path, self.flags, 0o600, 0.04)
+        self.assertEqual(self.path.read_bytes(), b"")
+
+    def test_existing_nonempty_lock_is_not_initialized_or_modified(self):
+        self.path.write_bytes(b"existing lock")
+        with patch.object(platform, "_initialize_windows_lock_byte") as initialize:
+            handle, _ = platform._open_windows_lock_file(self.path, self.flags, 0o600, 1)
+        try:
+            initialize.assert_not_called()
+            self.assertEqual(self.path.read_bytes(), b"existing lock")
+        finally:
+            handle.close()
+
+    def test_persistent_permission_error_is_propagated(self):
+        self.path.write_bytes(b"\0")
+        real_open = platform.os.open
+        regular_attempts = 0
+
+        def denied_open(path, flags, mode=0o777):
+            nonlocal regular_attempts
+            if flags & os.O_EXCL:
+                return real_open(path, flags, mode)
+            regular_attempts += 1
+            raise self._permission_error(5)
+
+        with patch.object(platform.os, "open", side_effect=denied_open):
+            with self.assertRaises(PermissionError) as caught:
+                platform._open_windows_lock_file(self.path, self.flags, 0o600, 1)
+        self.assertEqual(caught.exception.winerror, 5)
+        self.assertEqual(regular_attempts, 1)
+
+    def test_only_windows_sharing_violation_is_retried_within_deadline(self):
+        self.path.write_bytes(b"\0")
+        real_open = platform.os.open
+        regular_attempts = 0
+
+        def transient_sharing_error(path, flags, mode=0o777):
+            nonlocal regular_attempts
+            if flags & os.O_EXCL:
+                return real_open(path, flags, mode)
+            regular_attempts += 1
+            if regular_attempts == 1:
+                raise self._permission_error(32)
+            return real_open(path, flags, mode)
+
+        with patch.object(platform.os, "open", side_effect=transient_sharing_error):
+            handle, _ = platform._open_windows_lock_file(self.path, self.flags, 0o600, 1)
+        try:
+            self.assertEqual(regular_attempts, 2)
+            self.assertEqual(self.path.read_bytes(), b"\0")
+        finally:
+            handle.close()
+
+    def test_fdopen_failure_closes_the_open_descriptor(self):
+        self.path.write_bytes(b"\0")
+        real_open = platform.os.open
+        descriptors = []
+
+        def capture_open(path, flags, mode=0o777):
+            fd = real_open(path, flags, mode)
+            if not flags & os.O_EXCL:
+                descriptors.append(fd)
+            return fd
+
+        with patch.object(platform.os, "open", side_effect=capture_open), \
+                patch.object(platform.os, "fdopen", side_effect=OSError("fdopen failed")):
+            with self.assertRaisesRegex(OSError, "fdopen failed"):
+                platform._open_windows_lock_file(self.path, self.flags, 0o600, 1)
+
+        self.assertEqual(len(descriptors), 1)
+        with self.assertRaises(OSError):
+            platform.os.fstat(descriptors[0])
+
+    def test_fstat_failure_closes_the_open_handle(self):
+        self.path.write_bytes(b"\0")
+        real_fdopen = platform.os.fdopen
+        handles = []
+
+        def capture_fdopen(fd, *args, **kwargs):
+            handle = real_fdopen(fd, *args, **kwargs)
+            handles.append(handle)
+            return handle
+
+        with patch.object(platform.os, "fdopen", side_effect=capture_fdopen), \
+                patch.object(platform.os, "fstat", side_effect=OSError("fstat failed")):
+            with self.assertRaisesRegex(OSError, "fstat failed"):
+                platform._open_windows_lock_file(self.path, self.flags, 0o600, 1)
+
+        self.assertEqual(len(handles), 1)
+        self.assertTrue(handles[0].closed)
+
+
+if __name__ == "__main__":
     unittest.main()
