@@ -27,9 +27,14 @@ from zoneinfo import ZoneInfo
 from . import platform as _platform
 
 
-VERSION = "0.8.0"
+VERSION = "0.9.0"
 RESOURCE = "codex-adaptive-agents"
 CHILD_MODEL = "gpt-6-luna"
+TERRA_MODEL = "gpt-6.1-terra"
+TERRA_EFFORT = "xhigh"
+TERRA_ROLE = "adaptive_terra_xhigh"
+TERRA_MIN_CLI = (0, 159, 0)
+TASK_KINDS = ("general", "computer", "browser")
 MODEL_DIAL_URL = "https://modeldial.com/api/v1/radar/latest.json"
 DENG_URL = "https://api.codexradar.com/api/v1/intelligence-efficiency?v=20260823-trend-cohort-v1"
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
@@ -698,6 +703,13 @@ def _snapshot_path(home: Path) -> Path:
     return home / RESOURCE / "capabilities.json"
 
 
+def _terra_snapshot_path(home: Path) -> Path:
+    home = Path(os.path.expanduser(str(home)))
+    if not home.is_absolute():
+        raise PolicyError("absolute Codex home required")
+    return home / RESOURCE / "terra-capabilities.json"
+
+
 def _read_snapshot_document(path: Path) -> dict:
     """Read the structurally valid public snapshot, including probe metadata.
 
@@ -1296,35 +1308,77 @@ def _check_cli_version(raw: bytes) -> str:
     return text
 
 
-def _catalog_efforts(raw: bytes, *, require_full: bool = False) -> list[str]:
+def _cli_version_tuple(value: object) -> tuple[int, int, int] | None:
+    if not isinstance(value, str):
+        return None
+    match = _VERSION_RE.fullmatch(value.strip())
+    if not match:
+        return None
+    return tuple(map(int, match.groups()))
+
+
+def _catalogue_models(raw: bytes) -> tuple[list[str], list[str], str]:
+    """Read exact public Luna and Terra declarations without mixing models."""
     value = _strict_json(raw)
     if not isinstance(value, dict) or set(value) != {"models"} or not isinstance(value.get("models"), list):
         raise PolicyError("unsupported public model catalogue schema")
     luna_levels = None
+    terra_levels = None
+    terra_status = "missing"
     for item in value["models"]:
         if not isinstance(item, dict):
             raise PolicyError("unsupported public model catalogue schema")
         slug = item.get("slug")
-        if slug != CHILD_MODEL:
+        if slug not in (CHILD_MODEL, TERRA_MODEL):
             continue
-        if luna_levels is not None:
+        if slug == CHILD_MODEL and luna_levels is not None:
             raise PolicyError("duplicate requested model in public catalogue")
+        if slug == TERRA_MODEL and terra_levels is not None:
+            terra_levels = []
+            terra_status = "conflict"
+            continue
         levels = item.get("supported_reasoning_levels")
         if not isinstance(levels, list):
-            raise PolicyError("unsupported reasoning-level catalogue")
+            if slug == CHILD_MODEL:
+                raise PolicyError("unsupported reasoning-level catalogue")
+            terra_levels = []
+            terra_status = "invalid"
+            continue
         efforts = []
+        malformed = False
         for level in levels:
             if not isinstance(level, dict) or not isinstance(level.get("effort"), str) or not level["effort"]:
-                raise PolicyError("unsupported reasoning-level catalogue")
+                malformed = True
+                break
             efforts.append(level["effort"])
+        if malformed:
+            if slug == CHILD_MODEL:
+                raise PolicyError("unsupported reasoning-level catalogue")
+            terra_levels = []
+            terra_status = "invalid"
+            continue
         if len(efforts) != len(set(efforts)):
-            raise PolicyError("duplicate reasoning level")
-        luna_levels = efforts
+            if slug == CHILD_MODEL:
+                raise PolicyError("duplicate reasoning level")
+            terra_levels = []
+            terra_status = "conflict"
+            continue
+        if slug == CHILD_MODEL:
+            luna_levels = efforts
+        else:
+            terra_levels = efforts
+            terra_status = "available"
     if luna_levels is None:
         raise PolicyError("public client catalogue does not contain Luna")
-    supported = _canonical_efforts([effort for effort in luna_levels if effort in EFFORTS])
-    if not supported:
+    luna_supported = _canonical_efforts([effort for effort in luna_levels if effort in EFFORTS])
+    if not luna_supported:
         raise PolicyError("public client catalogue contains no supported Luna effort")
+    terra_supported = _canonical_efforts([effort for effort in (terra_levels or []) if effort in EFFORTS])
+    return luna_supported, terra_supported, terra_status
+
+
+def _catalog_efforts(raw: bytes, *, require_full: bool = False) -> list[str]:
+    supported, _terra, _terra_status = _catalogue_models(raw)
     if require_full and set(supported) != set(EFFORTS):
         raise PolicyError("public client catalogue does not support all five Luna roles")
     return supported
@@ -1345,28 +1399,162 @@ def DirectSupportedEfforts(home: Path, codex: str) -> list[str]:
     return direct_supported_efforts(home, codex)
 
 
-def preflight(home: Path, codex: str, *, now: datetime | None = None) -> dict:
-    """Read-only public prerequisite check; never writes the snapshot."""
-    if not isinstance(codex, str) or not codex:
+def _preflight_documents(home: Path, codex: str, *, now: datetime | None = None) -> tuple[dict, dict]:
+    """Return independent Luna and Terra observations from one CLI catalogue."""
+    if not isinstance(codex, str) or not codex or not Path(codex).is_absolute():
         raise PolicyError("official Codex CLI command unavailable")
     home = Path(os.path.expanduser(str(home)))
     if not home.is_absolute():
         raise PolicyError("absolute Codex home required")
     cli = _check_cli_version(_stdout(_run_codex(home, [codex, "--version"], timeout=5, limit=65536)))
-    efforts = _catalog_efforts(_stdout(_run_codex(home, [codex, "debug", "models"], timeout=5, limit=MAX_SOURCE_BYTES)), require_full=True)
-    return {"schema": 2, "checked_at": _stamp(_utc(now)), "supported_efforts": efforts,
+    catalog_raw = _stdout(_run_codex(home, [codex, "debug", "models"], timeout=5, limit=MAX_SOURCE_BYTES))
+    luna_efforts, terra_efforts, terra_status = _catalogue_models(catalog_raw)
+    if set(luna_efforts) != set(EFFORTS):
+        raise PolicyError("public client catalogue does not support all five Luna roles")
+    checked_at = _stamp(_utc(now))
+    luna = {"schema": 2, "checked_at": checked_at, "supported_efforts": luna_efforts,
             "child_model": CHILD_MODEL, "codex": codex, "cli_version": cli,
             "evidence": "public_client_catalogue"}
+    terra = {"schema": 1, "model": TERRA_MODEL, "checked_at": checked_at,
+             "supported_efforts": terra_efforts, "catalogue_status": terra_status,
+             "codex": codex, "cli_version": cli, "evidence": "public_client_catalogue"}
+    return luna, terra
+
+
+def preflight(home: Path, codex: str, *, now: datetime | None = None) -> dict:
+    """Read-only Luna-compatible prerequisite check; never writes snapshots."""
+    return _preflight_documents(home, codex, now=now)[0]
+
+
+def preflight_all(home: Path, codex: str, *, now: datetime | None = None) -> dict:
+    """Read-only preflight returning model-bound observations for installation."""
+    luna, terra = _preflight_documents(home, codex, now=now)
+    return {"luna": luna, "terra": terra}
 
 
 def refresh_capabilities(home: Path, codex: str, *, now: datetime | None = None) -> dict:
-    """Run the public preflight and atomically store only its public snapshot."""
+    """Refresh the Luna snapshot and separate, exact-model Terra observation."""
     home = Path(os.path.expanduser(str(home)))
     if not home.is_absolute():
         raise PolicyError("absolute Codex home required")
-    snapshot = preflight(home, codex, now=now)
-    _atomic(_snapshot_path(home), _encode(snapshot))
-    return snapshot
+    snapshots = preflight_all(home, codex, now=now)
+    try:
+        _atomic(_snapshot_path(home), _encode(snapshots["luna"]))
+    except PolicyError:
+        raise PolicyError("Luna capability snapshot write failed; refresh incomplete") from None
+    try:
+        _atomic(_terra_snapshot_path(home), _encode(snapshots["terra"]))
+    except PolicyError:
+        raise PolicyError("Terra capability snapshot write failed; refresh incomplete") from None
+    return snapshots["luna"]
+
+
+def _read_terra_snapshot(home: Path) -> dict:
+    raw = _read(_terra_snapshot_path(home))
+    if raw is None or not raw:
+        raise PolicyError("Terra capability snapshot unavailable; run refresh")
+    try:
+        value = _strict_json(raw)
+    except PolicyError:
+        raise PolicyError("Terra capability snapshot invalid; run refresh") from None
+    allowed = {"schema", "model", "checked_at", "supported_efforts", "catalogue_status",
+               "codex", "cli_version", "evidence"}
+    if (not isinstance(value, dict) or set(value) != allowed or type(value.get("schema")) is not int
+            or value.get("schema") != 1 or value.get("model") != TERRA_MODEL
+            or value.get("evidence") != "public_client_catalogue"):
+        raise PolicyError("Terra capability snapshot invalid; run refresh")
+    efforts = value.get("supported_efforts")
+    if (not isinstance(efforts, list) or
+            any(not isinstance(effort, str) or effort not in EFFORTS for effort in efforts) or
+            len(efforts) != len(set(efforts)) or efforts != _canonical_efforts(efforts)):
+        raise PolicyError("Terra capability snapshot invalid; run refresh")
+    status = value.get("catalogue_status")
+    if status not in {"available", "missing", "invalid", "conflict"}:
+        raise PolicyError("Terra capability snapshot invalid; run refresh")
+    if status != "available" and efforts:
+        raise PolicyError("Terra capability snapshot invalid; run refresh")
+    if status == "available" and not efforts:
+        # A present model with no recognized reasoning level is not evidence
+        # that xhigh or any other model's effort is supported.
+        pass
+    checked_at = _time(value.get("checked_at"), required=True)
+    try:
+        original = datetime.fromisoformat(str(value["checked_at"]).replace("Z", "+00:00"))
+    except ValueError:
+        raise PolicyError("Terra capability snapshot invalid; run refresh") from None
+    if original.utcoffset() != timedelta(0):
+        raise PolicyError("Terra capability snapshot invalid; run refresh")
+    codex = value.get("codex")
+    if not isinstance(codex, str) or not codex or not Path(codex).is_absolute():
+        raise PolicyError("Terra capability snapshot invalid; run refresh")
+    cli_version = value.get("cli_version")
+    cli_tuple = _cli_version_tuple(cli_version)
+    if cli_tuple is None:
+        raise PolicyError("Terra capability snapshot invalid; run refresh")
+    return {"schema": 1, "model": TERRA_MODEL, "checked_at": _stamp(checked_at),
+            "supported_efforts": list(efforts), "catalogue_status": status,
+            "cli_version": cli_version, "cli_version_tuple": cli_tuple,
+            "codex": codex, "evidence": "public_client_catalogue"}
+
+
+def select_task_kind(home: Path, project: Path | None, task_kind: str, *,
+                     codex: str | None = None, now: datetime | None = None) -> dict:
+    """Route general work through Luna policy and actual UI work through Terra."""
+    if task_kind not in TASK_KINDS:
+        raise PolicyError("task kind must be general, computer, or browser")
+    if task_kind == "general":
+        return select(home, project, now=now, codex=codex)
+    current = _utc(now)
+    reasons = []
+    try:
+        if os.environ.get("ORCHESTRATOR_WORKER") == "1":
+            raise PolicyError("selector disabled for worker process")
+        if not isinstance(codex, str) or not codex:
+            raise PolicyError("official Codex CLI command unavailable")
+        current_raw = _stdout(_run_codex(
+            Path(home), [codex, "--version"], timeout=5, limit=65536))
+        try:
+            current_text = current_raw.decode("utf-8").strip()
+        except UnicodeDecodeError:
+            current_text = ""
+        current_cli = _cli_version_tuple(current_text)
+        if current_cli is None:
+            raise PolicyError("Codex CLI version unavailable")
+        if current_cli < TERRA_MIN_CLI:
+            raise PolicyError("Terra computer/browser routing requires Codex CLI 0.159.0 or later")
+        snapshot = _read_terra_snapshot(Path(home))
+        snapshot_cli = snapshot["cli_version_tuple"]
+        current_codex = os.path.abspath(os.path.expanduser(codex))
+        if snapshot["codex"] != current_codex:
+            raise PolicyError("Terra capability snapshot CLI path differs from the current CLI; run refresh")
+        if snapshot_cli < TERRA_MIN_CLI:
+            raise PolicyError("Terra capability snapshot was recorded by Codex CLI older than 0.159.0; run refresh")
+        if snapshot_cli != current_cli:
+            raise PolicyError("Terra capability snapshot CLI version differs from the current CLI; run refresh")
+        checked = _time(snapshot["checked_at"], required=True)
+        if checked > current or current - checked > CAPABILITY_MAX_AGE:
+            raise PolicyError("Terra capability snapshot expired; run refresh")
+        if snapshot["catalogue_status"] == "missing":
+            raise PolicyError("public model catalogue does not contain gpt-6.1-terra; run refresh")
+        if snapshot["catalogue_status"] == "conflict":
+            raise PolicyError("public model catalogue has conflicting gpt-6.1-terra declarations; run refresh")
+        if snapshot["catalogue_status"] == "invalid":
+            raise PolicyError("public model catalogue has invalid gpt-6.1-terra reasoning levels; run refresh")
+        if TERRA_EFFORT not in snapshot["supported_efforts"]:
+            raise PolicyError("public model catalogue does not support gpt-6.1-terra xhigh; run refresh")
+    except PolicyError as error:
+        reasons.append(str(error))
+    if reasons:
+        return {"role": "", "model": TERRA_MODEL, "effort": TERRA_EFFORT,
+                "task_kind": task_kind, "status": "blocked", "refreshed": False,
+                "stale": True, "reasons": reasons,
+                "generated_at": _stamp(current), "capabilities_at": _stamp(None)}
+    return {"role": TERRA_ROLE, "model": TERRA_MODEL, "effort": TERRA_EFFORT,
+            "task_kind": task_kind, "status": "ready", "refreshed": False,
+            "stale": False, "reasons": [], "generated_at": _stamp(current),
+            "capabilities_at": snapshot["checked_at"],
+            "capability_source": "public_client_catalogue",
+            "codex_cli_version": snapshot["cli_version"]}
 
 
 def doctor_capabilities(home: Path, codex: str) -> dict:
@@ -1391,9 +1579,11 @@ def doctor_capabilities(home: Path, codex: str) -> dict:
 
 
 __all__ = [
-    "VERSION", "RESOURCE", "EFFORTS", "MODEL_DIAL_URL", "DENG_URL", "PolicyError",
+    "VERSION", "RESOURCE", "EFFORTS", "TERRA_MODEL", "TERRA_EFFORT", "TERRA_ROLE", "TASK_KINDS",
+    "MODEL_DIAL_URL", "DENG_URL", "PolicyError",
     "config_key", "parse_modeldial", "parse_deng", "fetch_sources", "FetchSources",
     "select_policy", "read_cached", "cached_select", "select", "select_for_root", "read_capabilities",
-    "direct_supported_efforts", "DirectSupportedEfforts", "preflight",
+    "direct_supported_efforts", "DirectSupportedEfforts", "preflight", "preflight_all",
     "refresh_capabilities", "doctor_capabilities",
+    "select_task_kind",
 ]

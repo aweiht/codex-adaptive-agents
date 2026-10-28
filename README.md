@@ -1,21 +1,21 @@
-# Codex Adaptive Agents 0.8.0
+# Codex Adaptive Agents 0.9.0
 
 [简体中文](README.zh-CN.md)
 
 Codex Adaptive Agents is a small Python runtime and installer for the official
-Codex CLI. It lets the root agent choose a bounded Luna role when a task is
-worth delegating, while the official Codex client keeps ownership of login,
-provider access, and model execution.
+Codex CLI. It routes general work through five scored Luna roles and actual
+computer/browser work through one dedicated Terra role, while the official
+Codex client keeps ownership of login, provider access, and model execution.
 
 Installation, policy selection, and verification are implemented in this
 repository. No other agent-orchestration project is required. See the
 [implementation and dependency details](docs/UPSTREAM.md).
 
 After installation, continue to describe work in ordinary Codex tasks. The root
-agent plans and reviews the work, while 0–5 native Luna children take clearly bounded
-substantive work packages with explicit ownership and acceptance. The package
-adds configuration and scripts to Codex; it has no separate chat window and
-installs no background service or MCP server.
+agent plans and reviews the work, while up to five Luna children or a single
+Terra owner take clearly bounded work packages with explicit ownership and
+acceptance. The package adds configuration and scripts to Codex; it has no
+separate chat window and installs no background service or MCP server.
 
 ## Easiest setup: copy these prompts into Codex
 
@@ -26,31 +26,31 @@ are also included below.
 
 ### Step 1: ask Codex to install
 
-This sets GPT-6 Luna child defaults at `xhigh`, five roles, and project
-instructions while preserving your main model, reasoning level, and unrelated
-configuration.
+This sets GPT-6 Luna child defaults at `xhigh`, installs its five roles plus a
+dedicated Terra `xhigh` role, and adds project instructions while preserving
+your main model, reasoning level, and unrelated configuration.
 
 ```text
 Install Codex Adaptive Agents for me from its project repository:
 https://github.com/aweiht/codex-adaptive-agents
 Preserve existing edits. Read the repository README.md, use this Codex client's existing CODEX_HOME, and run the checkout's exact codex-adaptive-agents.py entry with Python 3.11+ (`python3 codex-adaptive-agents.py` on macOS/Linux or `py -3 .\codex-adaptive-agents.py` on Windows).
-Install the managed Codex Adaptive Agents runtime, five adaptive_luna_* roles, and instructions while preserving unrelated settings, roles, backups, and files.
+Install the managed Codex Adaptive Agents runtime, five adaptive_luna_* roles, the adaptive_terra_xhigh role, and instructions while preserving unrelated settings, roles, backups, and files.
 Run `install --dry-run`, review the plan, then apply exactly the returned plan with `install --yes --plan-id <plan_id>`. Run `doctor`; refresh only if its capability snapshot or policy cache is stale, then check doctor once more.
 Complete the installation and report the source path, CODEX_HOME, plan result, and doctor status. Accept success only when installation completes and doctor is READY or READY_FALLBACK. Do not run verify --live or any model task in this step. Explain any dependency, login, permission, or conflict that needs attention.
 ```
 
 ### Step 2: open a new Codex task and verify
 
-This checks local installation readiness and child-role selection separately,
-without starting an extra model test. `READY` or `READY_FALLBACK` means the
-local installation is ready. A successful selection means a child role was
-chosen under the current Luna capability and policy data.
+This checks local installation readiness and general child-role selection
+without starting a model test. `READY` or `READY_FALLBACK` means the local Luna
+installation is ready. Use an explicit computer/browser selection only for
+work that actually requires UI access.
 
 ```text
 Verify my Codex Adaptive Agents installation:
 https://github.com/aweiht/codex-adaptive-agents
 Use this Codex client's existing CODEX_HOME and locate `CODEX_HOME/codex-adaptive-agents/runtime/codex-adaptive-agents.py`. With Python 3.11+ (`python3` on macOS/Linux or `py -3` on Windows), run `python3 "$CODEX_HOME/codex-adaptive-agents/runtime/codex-adaptive-agents.py" --codex-home "$CODEX_HOME" doctor` (or the equivalent `py -3` command) through that installed entry, then run `select --project <temporary-directory> --explain`. No main-model argument or confirmation is needed.
-Refresh only when doctor reports a stale child capability snapshot or policy cache, and check doctor again. Confirm selection returns an installed `adaptive_luna_*` role when local child capability and policy data allow it.
+Refresh when doctor reports a stale Luna capability snapshot or policy cache, then check doctor again. For the computer/browser route, also run `select --task-kind browser --explain` or `select --task-kind computer --explain`; if it reports a missing, expired, or CLI-mismatched Terra sidecar, run `refresh` explicitly and repeat the selection. Terra refresh does not depend on doctor becoming `NOT_READY`, because doctor checks the Luna installation path. Confirm the default selection returns an installed `adaptive_luna_*` role when Luna capability and policy data allow it. A computer/browser selection must return `adaptive_terra_xhigh` from a fresh matching Terra capability snapshot.
 Do not reinstall, change business files, run verify --live, call a model, or treat selection as a child-agent invocation. Report installation readiness from doctor independently from the selection result, with the actual statuses and any failure reason.
 ```
 
@@ -88,6 +88,8 @@ The installer manages a small, explicit scope in the user's Codex home:
 - GPT-6 Luna is configured as the default subagent: `gpt-6-luna` at `xhigh`.
 - Five role files are installed: `adaptive_luna_low`, `adaptive_luna_medium`,
   `adaptive_luna_high`, `adaptive_luna_xhigh`, and `adaptive_luna_max`.
+- One dedicated `adaptive_terra_xhigh` role is installed for computer and
+  browser work. It does not change the Luna default or the five-thread limit.
 - A daily policy cache chooses one of those roles from the local public model
   catalogue and the two public radar sources. No model call is used for this
   selection.
@@ -120,14 +122,17 @@ You need all of the following before applying an installation:
 
 - Python 3.11 or newer. The runtime uses only the Python standard library; no
   pip package, Go compiler, or compiled binary is required.
-- The official Codex CLI 0.147.0 or newer.
+- The official Codex CLI 0.147.0 or newer for Luna routes. Terra
+  computer/browser routes require Codex CLI 0.159.0 or newer.
 - A Codex client that supports native custom agents. Normal use and live
   verification require model access and available account allowance.
 - A normally configured official Codex home and account whose public catalogue
   exposes `gpt-6-luna` with all five child levels:
   `low`, `medium`, `high`, `xhigh`, and `max`.
-- Main-model identity is not an eligibility condition. Delegation depends on
-  the installed Luna child capabilities and selection policy.
+- Luna is the default general-work route. Terra capability is required only
+  for computer/browser selections and is not needed for ordinary Luna routing.
+- Main-model identity is not an eligibility condition. The task kind and its
+  exact model capability determine the selected role.
 
 The installer reads the CLI's public version and child-model catalogue through
 `codex --version` and `codex debug models`. Child capability maintenance does
@@ -195,18 +200,49 @@ example:
 > independent work to Luna, then review the changes and report the verification.
 
 You do not need to start a worker or run the selector yourself. Before
-substantive work starts, the root agent does only enough exploration to identify the
-boundary, then decides the route. Independent work can run in parallel, with
-at most five direct Luna children in one task. Before a delegation batch, the
-managed instructions call the daily selector; external rankings are only a
-selection aid and do not guarantee lower token use, speed, or task quality.
+substantive work starts, the root agent does only enough exploration to identify
+the boundary, then selects the route. Use `general` for code, HTTP/API, and text
+work. Use `browser` or `computer` only when the package must inspect or operate
+a real browser page or desktop app; mentioning a browser in task text does not
+trigger Terra. General work can use at most five direct Luna children. A real
+GUI work package uses one Terra owner, and that child does not delegate further.
+External rankings are only a Luna selection aid and do not guarantee lower
+token use, speed, or task quality.
+
+### Installed routing flow
+
+```mermaid
+flowchart TD
+    A[Receive a task] --> B{Is it a simple task or a root-only decision}
+    B -->|Yes| C[Main agent handles it directly]
+    B -->|No| D{Can it be an independent bounded work package}
+    D -->|No| C
+    D -->|Yes| E{Does it need real computer or browser interaction}
+    E -->|No| F[Check local Luna capabilities and the existing selection policy]
+    F -->|Pass| G[Dispatch the selected Luna role]
+    F -->|Blocked| H[Report the reason and pause the general package]
+    E -->|Yes| I[Check installed Terra role, fresh CLI matched catalogue, and CLI ≥ 0.159.0]
+    I -->|Pass| J[Use GPT-6.1 Terra xhigh with one GUI owner]
+    I -->|Blocked| K[Report the reason and pause the GUI package]
+    K --> L[Fix the blocker, then recheck Terra capability]
+    L --> I
+    G --> M[Original owner implements and verifies]
+    J --> M
+    M --> N[Main agent reviews and accepts]
+    N -->|Changes needed| O[Return ordinary fixes to original owner]
+    O --> M
+    N -->|Accepted| P[Deliver]
+    C --> P
+```
+
+Across Luna and Terra together, a session has at most five direct subagents; child agents do not delegate further. This diagram describes the installed workflow and does not prove that the host provides or has validated real computer/browser capability. If Terra checks fail, pause that GUI package, fix the blocker, then recheck; do not silently switch it to Luna.
 
 ### Delegation gate
 
 The root agent owns requirements, key decisions, public interfaces, coordination, and
-final acceptance. A safe work package with an explicit goal, boundary, artifact
-or problem ownership, and checkable acceptance must be handed to a native Luna
-child when the host permits it, before that package starts. This is a trial
+final acceptance. A general work package with an explicit goal, boundary,
+artifact or problem ownership, and checkable acceptance must be handed to a
+native Luna child when the host permits it, before that package starts. This is a trial
 routing policy: it makes no
 promise of lower token usage or faster completion, sets no total-cost or
 elapsed-time threshold, uses no 2:8 (or other) delegation ratio, and adds no
@@ -245,7 +281,8 @@ substantive batch into small edits to avoid this assessment. Independent
 packages may run in parallel; dependent packages run serially. Shared GUI,
 database, port, or build-output resources have one owner and are serialized
 when needed; a resource constraint does not by itself cancel a valid work
-package. A task uses no more than five direct Luna children, and agents are not
+package. A session uses no more than five direct children in total. General
+work uses Luna, while real GUI work uses one Terra owner; agents are not
 started merely to satisfy a ratio or create duplicate work.
 
 If the user specifies a worker count or parallel arrangement that cannot be met
@@ -367,7 +404,9 @@ home:
 - managed keys in `config.toml`;
 - one marked, managed block in `AGENTS.md`;
 - the five `agents/adaptive_luna_*.toml` role files;
-- the runtime, installation receipt, capability snapshot, transaction journal,
+- `agents/adaptive_terra_xhigh.toml` for the computer/browser route;
+- the runtime, installation receipt, Luna and Terra capability snapshots,
+  transaction journal,
   and private backups under `codex-adaptive-agents/`.
 
 Backups are kept under
@@ -379,8 +418,10 @@ transaction, and rollback refuses to overwrite a newer concurrent change.
 ## Status and troubleshooting
 
 `doctor` performs an offline post-install check. It checks managed hashes, the
-installed entry point, the official CLI version, the saved public capability
-snapshot, and the local policy cache. It does not call a model.
+installed entry point, the official CLI version, the saved Luna capability
+snapshot, and the local policy cache. It does not call a model. Terra
+capability is checked on each computer/browser selection; Terra being
+unavailable does not change Luna's doctor status.
 
 - `READY` means the installation and current local capability/policy state are
   usable.
@@ -396,7 +437,9 @@ Use the matching repair path:
 
 - **Codex is missing or too old:** install or update the official CLI, run its
   normal `codex login`, then rerun `doctor`. If `codex` is not on `PATH`, pass
-  `--codex /absolute/path/to/codex` to `install`, `doctor`, or `refresh`.
+  `--codex /absolute/path/to/codex` to `install`, `doctor`, `refresh`, or a
+  computer/browser `select`. Luna routes require CLI 0.147.0+; Terra routes
+  require 0.159.0+.
 - **The public catalogue is missing Luna child levels:** run `codex debug models` in
   the Codex home you intend to use. `gpt-6-luna` with all five child levels
   must be present before `install --yes` can write anything. An empty
@@ -425,18 +468,35 @@ To inspect the selected role, use `select`:
 ```sh
 python3 codex-adaptive-agents.py select --project /path/to/project
 python3 codex-adaptive-agents.py select --project /path/to/project --explain
+python3 codex-adaptive-agents.py select --project /path/to/project --task-kind browser --explain
+python3 codex-adaptive-agents.py select --project /path/to/project --task-kind computer
 ```
 
 `select` chooses a role from child capability and policy data; it never starts a
 child agent. The project policy cache lives in `.codex-adaptive-agents/state`; add `.codex-adaptive-agents/` to
 the project's ignore file. `select` may refresh once per local day. `refresh`
-explicitly updates the public capability snapshot and policy inputs. Use
-`refresh --project /path/to/project` updates that project's policy inputs after
-a same-day selection failure; plain `refresh` updates the home-level policy.
+explicitly updates the public capability snapshots and policy inputs. The Luna
+cache and model capability remain separate from Terra's model-bound snapshot.
+Terra selection requires an unexpired public catalogue observation for exactly
+`gpt-6.1-terra` with `xhigh`, a matching CLI version snapshot, and current Codex
+CLI 0.159.0 or newer. A missing, malformed, conflicting, unsupported, or stale
+Terra snapshot blocks that route and asks for `refresh`; it does not block
+general Luna selection. Old Luna schema-1/2 snapshots cannot prove Terra
+capability. `refresh` never invokes a model. It replaces a damaged or stale
+Terra sidecar only after the Luna CLI/catalogue preflight succeeds. The Luna
+`capabilities.json` remains schema 1/2 and usable by a 0.8.0 runtime after
+rollback; the non-executable Terra sidecar is outside the install receipt,
+remains after upgrade, rollback, or uninstall, and is ignored by 0.8.0. Use
+`refresh --project /path/to/project` to update that project's policy inputs
+after a same-day selection failure; plain `refresh` updates the home-level policy.
 These commands refresh local/public policy data only: they do not retry a native
 child dispatch or establish quota recovery. Neither command invokes a model.
 
-![0.8.0 source CLI output for root-independent role selection](docs/images/cli-check.svg)
+Selecting a Terra role does not grant browser/desktop access or enforce a
+permission boundary. A GUI package has one owner, and its Terra child does not
+delegate further. The role setup does not lock global session concurrency.
+
+![0.9.0 source CLI output illustrating task-kind routing](docs/images/cli-check.svg)
 
 _This SVG presents actual source-CLI output for `select --project` without a
 root-model argument, captured on 2026-09-30 after a synthetic isolated
@@ -489,19 +549,26 @@ public result. No plugin effort allowlist is applied to the root. This CLI's
 configuration is not an automatic read of a separate desktop Codex task's
 active model.
 
-The command uses a temporary official stdio test channel, starts at most two
-direct native Luna children, and is bounded at 600 seconds. A complete,
-independently checked run returns `LIVE_VERIFIED`. It may consume real quota;
-do not treat it as a default installation step. The temporary channel is not
-an installed MCP server, daemon, Hook, scheduler, or resident process.
+The default command uses a temporary official stdio test channel, starts at
+most two direct native Luna children, and is bounded at 600 seconds. The
+transport verifier also recognizes an explicit Terra role and checks its exact
+model/effort identity, but that check does not exercise or verify GUI work. A
+complete, independently checked run returns `LIVE_VERIFIED`. It may consume
+real quota; do not treat it as a default installation step. The temporary
+channel is not an installed MCP server, daemon, Hook, scheduler, or resident
+process.
+
+For an explicit Terra dispatch-identity check, add `--role
+adaptive_terra_xhigh` to `verify --live`. The installed Terra role, a fresh
+matching Terra capability snapshot, and Codex CLI 0.159.0 or later are required
+before a turn starts. The check does not perform browser or desktop operations.
 
 ## Validation boundary
 
-The current 0.8.0 evidence is revision- and environment-specific. No new live
-model verification was requested for this revision, and no historical CI run
-proves the current source. See [docs/VALIDATION.md](docs/VALIDATION.md) for the
-current local boundary and the earlier published CI result tied to its exact
-commit.
+The 0.9.0 source checks and simulated lifecycle are revision- and
+environment-specific. No real Terra GUI operation or new live model task was
+requested for this revision. Historical CI applies only to its exact commit.
+See [docs/VALIDATION.md](docs/VALIDATION.md) for the verified boundary.
 
 ## Update, recovery, and uninstall
 
@@ -553,7 +620,7 @@ members, broken public Markdown links, private paths, and overwriting an
 existing archive:
 
 ```sh
-python3 scripts/release_python.py --output-dir dist/0.8.0-python
+python3 scripts/release_python.py --output-dir dist/0.9.0-python
 ```
 
 The project is distributed under the [Apache License 2.0](LICENSE). See

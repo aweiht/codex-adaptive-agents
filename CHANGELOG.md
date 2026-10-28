@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.9.0 — Unreleased
+
+- Add `select --task-kind general|computer|browser`; general keeps the existing
+  five-level Luna scoring policy, while real computer/browser work selects a
+  dedicated `gpt-6.1-terra` `xhigh` role without reading Luna scores.
+- Store Terra capability in its own model-bound, 72-hour public-catalogue
+  snapshot. Preserve Luna schema-1/2 capability compatibility and reject Terra
+  selection when the exact model/effort is absent, conflicting, stale, or the
+  current/snapshot Codex CLI is older than 0.159.0.
+- Install a sixth dedicated role while preserving the exact 0.6.0, 0.7.0, and
+  0.8.0 receipt layouts and the user's main model, reasoning effort, and
+  unrelated configuration. Keep the five-thread setting unchanged.
+- Bind transport and public-event verification to the selected role's exact
+  model and effort; Terra dispatch verification does not claim a GUI operation.
+- Route actual UI work to one Terra owner, forbid downward delegation in that
+  role's instructions, and clarify that task prompts and role files do not
+  enforce host permissions or global concurrency.
+
 ## 0.8.0 — Unreleased
 
 - Remove root-model eligibility checks: selection works the same for missing,

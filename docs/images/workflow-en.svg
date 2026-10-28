@@ -17,11 +17,11 @@
 <rect x="470" y="225" width="45" height="40" rx="9" fill="#00FFCC"/>
 <text x="483" y="252" fill="#10171D" font-size="25" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">2</text>
 <text x="530" y="251" fill="#00FFCC" font-size="22" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">USE CODEX</text>
-<text x="470" y="311" fill="#F3F7F9" font-size="25" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">Open a new Codex task</text>
-<text x="470" y="360" fill="#F3F7F9" font-size="23" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">Describe your task</text>
-<text x="470" y="398" fill="#F3F7F9" font-size="23" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">Root agent plans + reviews</text>
-<text x="470" y="436" fill="#F3F7F9" font-size="23" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">0–5 native Luna agents</text>
-<text x="470" y="471" fill="#B9C8D2" font-size="19" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">Small tasks can stay direct</text>
+<text x="470" y="311" fill="#F3F7F9" font-size="25" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">Choose route from actual tools</text>
+<text x="470" y="360" fill="#F3F7F9" font-size="23" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">general → Luna policy</text>
+<text x="470" y="398" fill="#F3F7F9" font-size="23" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">computer/browser → Terra xhigh</text>
+<text x="470" y="436" fill="#F3F7F9" font-size="23" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">One owner for each GUI package</text>
+<text x="470" y="471" fill="#B9C8D2" font-size="19" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">Selection does not start an agent</text>
 <rect x="848" y="203" width="384" height="290" rx="16" fill="#1A252E"/>
 <rect x="870" y="225" width="45" height="40" rx="9" fill="#00FFCC"/>
 <text x="883" y="252" fill="#10171D" font-size="25" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">3</text>
@@ -31,5 +31,5 @@
 <text x="870" y="398" fill="#F3F7F9" font-size="23" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">select: role choice</text>
 <text x="870" y="436" fill="#F3F7F9" font-size="23" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">verify --live: real tasks</text>
 <text x="870" y="471" fill="#B9C8D2" font-size="19" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">Live check uses model quota</text>
-<text x="48" y="554" fill="#B9C8D2" font-size="22" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">Workflow illustration. Actual delegation depends on the task.</text>
+<text x="48" y="554" fill="#B9C8D2" font-size="22" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">Workflow illustration. GUI routing is chosen explicitly for each task.</text>
 </svg>

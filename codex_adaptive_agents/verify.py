@@ -35,11 +35,19 @@ MAX_PUBLIC_MESSAGE_BYTES = 4 * 1024 * 1024
 MAX_OUTPUT_BYTES = 2 * 1024 * 1024
 MAX_EVENTS = 12000
 DEFAULT_EXPECTED_ROLE = "adaptive_luna_xhigh"
-ALLOWED_ROLES = frozenset(
-    f"adaptive_luna_{effort}" for effort in ("low", "medium", "high", "xhigh", "max")
-)
-ROLE_RE = re.compile(r"^adaptive_luna_(?:low|medium|high|xhigh|max)$")
+ROLE_MODEL_EFFORT = {
+    **{f"adaptive_luna_{effort}": ("gpt-6-luna", effort)
+       for effort in ("low", "medium", "high", "xhigh", "max")},
+    "adaptive_terra_xhigh": ("gpt-6.1-terra", "xhigh"),
+}
+ALLOWED_ROLES = frozenset(ROLE_MODEL_EFFORT)
+ROLE_RE = re.compile(r"^(?:adaptive_luna_(?:low|medium|high|xhigh|max)|adaptive_terra_xhigh)$")
 MCP_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def role_model_effort(role: str) -> tuple[str, str] | None:
+    """Return the exact public model and effort contract for an installed role."""
+    return ROLE_MODEL_EFFORT.get(role)
 
 
 class VerificationError(RuntimeError):
@@ -1099,8 +1107,12 @@ def validate_public_events(events: list[dict[str, Any]], expected_role: str = DE
     derived = _derive_public(events)
     errors = list(derived.errors)
     expected = expected_role if isinstance(expected_role, str) and expected_role else DEFAULT_EXPECTED_ROLE
-    if ROLE_RE.fullmatch(expected) is None:
-        errors.append("expected role is not adaptive_luna")
+    contract = role_model_effort(expected)
+    if ROLE_RE.fullmatch(expected) is None or contract is None:
+        errors.append("expected role is unsupported")
+        expected_model, expected_effort = "", ""
+    else:
+        expected_model, expected_effort = contract
 
     effective = derived.root_effective
     effective_model = effective.get("model")
@@ -1132,12 +1144,11 @@ def validate_public_events(events: list[dict[str, Any]], expected_role: str = DE
     if not derived.root_id:
         errors.append("missing root thread id")
 
-    expected_effort = expected.removeprefix("adaptive_luna_")
     for call in derived.spawn_tool_calls:
         # Missing/null values remain compatible with older public streams.  A
         # present, nonempty string is evidence and must agree with the selected role.
-        if call["model"] is not None and call["model"] != "gpt-6-luna":
-            errors.append("spawn requested model is not gpt-6-luna")
+        if call["model"] is not None and call["model"] != expected_model:
+            errors.append("spawn requested model differs from selected role")
         if call["reasoningEffort"] is not None and call["reasoningEffort"] != expected_effort:
             errors.append("spawn requested effort mismatch")
 
@@ -1217,7 +1228,6 @@ def validate_public_events(events: list[dict[str, Any]], expected_role: str = DE
                 depth = spawn.get("depth")
                 if isinstance(depth, bool) or _finite_number(depth) != 1:
                     errors.append("child spawn depth is not one: " + identifier)
-            expected_effort = expected.removeprefix("adaptive_luna_")
             claim_sources = [metadata, *derived.thread_started_metadata.get(identifier, [])]
             claims = list(claim_sources)
             for source in claim_sources:
@@ -1225,11 +1235,24 @@ def validate_public_events(events: list[dict[str, Any]], expected_role: str = DE
                     nested = source.get(name)
                     if isinstance(nested, Mapping):
                         claims.append(nested)
+            if expected == "adaptive_terra_xhigh":
+                effective_claims = list(claim_sources)
+                effective_claims.extend(
+                    source["effective"] for source in claim_sources
+                    if isinstance(source.get("effective"), Mapping)
+                )
+                if not any(isinstance(claim.get("model"), str) and claim.get("model")
+                           for claim in effective_claims):
+                    errors.append("child effective model is not publicly observable: " + identifier)
+                if not any(any(isinstance(claim.get(key), str) and claim.get(key)
+                               for key in ("reasoningEffort", "reasoning_effort"))
+                           for claim in effective_claims):
+                    errors.append("child effective effort is not publicly observable: " + identifier)
             for claim in claims:
                 model = claim.get("model")
-                if model is not None and model != "gpt-6-luna":
+                if model is not None and model != expected_model:
                     label = "requested" if claim is metadata.get("requested") else "effective"
-                    errors.append("child " + label + " model is not gpt-6-luna: " + identifier)
+                    errors.append("child " + label + " model differs from selected role: " + identifier)
                 efforts = [claim[key] for key in ("reasoningEffort", "reasoning_effort")
                            if key in claim and claim[key] is not None]
                 if any(value != expected_effort for value in efforts):

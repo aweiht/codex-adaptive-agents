@@ -1,12 +1,13 @@
 from pathlib import Path
 from contextlib import redirect_stderr
 from io import StringIO
+import json
 from types import SimpleNamespace
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from codex_adaptive_agents import transport, verify
+from codex_adaptive_agents import install, policy, transport, verify
 
 
 PASSING_TAGS = r'''#!/usr/bin/env python3
@@ -120,7 +121,7 @@ class TransportTests(unittest.TestCase):
                 self.assertTrue(fake.turn_started)
                 self.assertEqual(calls, ['initialize', 'thread/start', 'turn/start'])
                 self.assertEqual(selector_calls, [()])
-                self.assertIn('Starting two native Luna tasks', diagnostic.getvalue())
+                self.assertIn('Starting two native gpt-6-luna tasks', diagnostic.getvalue())
 
     def test_fake_session_full_public_validation_and_artifact_failures(self):
         for mode, expected_status in (("success", "LIVE_VERIFIED"),
@@ -301,11 +302,30 @@ class TransportTests(unittest.TestCase):
 
         def run_case(*, label, sibling="absent", nested="completed", child_conflict=False,
                      tool="spawnAgent",
-                     model="gpt-6-luna", effort="xhigh", expected="LIVE_VERIFIED"):
+                     model="gpt-6-luna", effort="xhigh", expected_role="adaptive_luna_xhigh",
+                     expected="LIVE_VERIFIED"):
             with tempfile.TemporaryDirectory() as directory:
                 base = Path(directory).resolve()
                 project, output = base / 'project', base / 'evidence'
+                home = base / 'home'
+                codex = str(base / 'codex')
                 instances = []
+
+                if expected_role == install.TERRA_ROLE:
+                    _, _, plan = install.build(home)
+                    install.apply(home, plan['plan_id'])
+                    resource = home / policy.RESOURCE
+                    resource.mkdir(parents=True, exist_ok=True)
+                    (resource / 'terra-capabilities.json').write_text(json.dumps({
+                        'schema': 1,
+                        'model': policy.TERRA_MODEL,
+                        'checked_at': policy._stamp(policy._utc()),
+                        'supported_efforts': ['low', 'medium', 'high', 'xhigh'],
+                        'catalogue_status': 'available',
+                        'codex': codex,
+                        'cli_version': 'codex-cli 0.159.0',
+                        'evidence': 'public_client_catalogue',
+                    }), encoding='utf-8')
 
                 class SyntheticSession(real_session_type):
                     def __init__(self, *_args):
@@ -350,10 +370,10 @@ class TransportTests(unittest.TestCase):
                                     'id': 'activity-' + child, 'type': 'subAgentActivity',
                                     'agentThreadId': child}})
                                 spawn = {'parent_thread_id': 'root',
-                                         'agent_role': 'adaptive_luna_xhigh', 'depth': 1}
+                                         'agent_role': expected_role, 'depth': 1}
                                 self.public('thread/started', {'thread': {
                                     'id': child, 'parentThreadId': 'root',
-                                    'agentRole': 'adaptive_luna_xhigh',
+                                    'agentRole': expected_role,
                                     'status': {'type': 'active'}, 'spawn': spawn}})
                                 self.public('thread/status/changed', {'threadId': child,
                                                                       'status': {'type': 'active'}})
@@ -382,11 +402,13 @@ class TransportTests(unittest.TestCase):
                             child = params['threadId']
                             return {'thread': {
                                 'id': child, 'parentThreadId': 'root',
-                                'agentRole': 'adaptive_luna_xhigh', 'model': 'gpt-6-luna',
-                                'reasoningEffort': 'xhigh', 'modelProvider': 'openai',
+                                'agentRole': expected_role,
+                                'model': model if tool == 'spawnAgent' else 'gpt-6-luna',
+                                'reasoningEffort': effort if tool == 'spawnAgent' else 'xhigh',
+                                'modelProvider': 'openai',
                                 'status': {'type': 'idle'},
                                 'spawn': {'parent_thread_id': 'root',
-                                          'agent_role': 'adaptive_luna_xhigh', 'depth': 1}}}
+                                          'agent_role': expected_role, 'depth': 1}}}
                         return {}
 
                 def fake_process(argv, **_kwargs):
@@ -402,10 +424,13 @@ class TransportTests(unittest.TestCase):
 
                 self.assertIs(SyntheticSession.handle, real_session_type.handle)
                 with patch.object(transport, 'Session', SyntheticSession), \
-                        patch.object(transport, 'run_process', side_effect=fake_process):
-                    result = transport.run(base / 'home', 'codex', project, output, None,
+                        patch.object(transport, 'run_process', side_effect=fake_process), \
+                        patch.object(policy, '_run_codex', return_value=SimpleNamespace(
+                            returncode=0, stdout=b'codex-cli 0.159.0\n', stderr=b'')):
+                    result = transport.run(home, codex, project, output,
+                                           expected_role if expected_role == install.TERRA_ROLE else None,
                                            root_model='gpt-6.1-sol', root_effort='ultra',
-                                           select_role=lambda: 'adaptive_luna_xhigh')
+                                           select_role=lambda: expected_role)
                 self.assertEqual(result['status'], expected, (label, result))
                 root_end = next(event for event in result['events']
                                 if event.get('event') == 'turn/completed'
@@ -416,6 +441,11 @@ class TransportTests(unittest.TestCase):
                     self.assertEqual(root_end['turn']['status'], nested)
                 if expected == 'LIVE_VERIFIED':
                     self.assertTrue(result['verification']['ok'], result)
+                    self.assertEqual(result['selected_role'], expected_role)
+                    selected_model, selected_effort = verify.role_model_effort(expected_role)
+                    self.assertEqual(result['selected_role_model'], selected_model)
+                    self.assertEqual(result['selected_role_effort'], selected_effort)
+                    self.assertFalse(result['gui_operation_verified'])
                 else:
                     self.assertFalse(result.get('verification', {}).get('ok', True), result)
                 return result
@@ -430,6 +460,9 @@ class TransportTests(unittest.TestCase):
                                  nested={'type': 'completed'})['verification']['ok'])
         self.assertTrue(run_case(label='missing nested status uses sibling',
                                  sibling={'type': 'completed'}, nested='absent')['verification']['ok'])
+        terra = run_case(label='Terra dispatch identity only', model='gpt-6.1-terra', effort='xhigh',
+                         expected_role='adaptive_terra_xhigh')
+        self.assertFalse(terra['gui_operation_verified'])
         child_conflict_result = run_case(label='child conflicting statuses', child_conflict=True,
                                          expected='LIVE_FAILED')
         self.assertIn('turn status fields conflict', child_conflict_result['verification']['errors'])
@@ -502,8 +535,13 @@ class TransportTests(unittest.TestCase):
             root=Path(directory).resolve()
             with patch.object(transport,'Session',side_effect=AssertionError('unexpected model call')):
                 result=transport.run(root,'codex',root/'project',root/'project'/'evidence','adaptive_luna_max')
+                terra=transport.run(root,'codex',root/'terra-project',root/'terra-evidence',
+                                    install.TERRA_ROLE)
             self.assertEqual(result['status'],'LIVE_FAILED')
             self.assertFalse((root/'project').exists())
+            self.assertEqual(terra['status'],'LIVE_FAILED')
+            self.assertIn('Terra role is not installed', terra['error'])
+            self.assertFalse((root/'terra-project').exists())
 
 
 if __name__=='__main__':

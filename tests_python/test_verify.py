@@ -49,6 +49,8 @@ for raw in sys.stdin.buffer:
 def good_events(role="adaptive_luna_xhigh", effort="xhigh", *, root_model="gpt-6-astra", root_effort="max") -> list[dict]:
     # Keep root/thread-started before root/client-effective to cover the
     # ordering seen in the public app-server stream.
+    role_contract = verify.role_model_effort(role) or ("", effort)
+    role_model, role_effort = role_contract
     events: list[dict] = [
         {
             "event": "thread/started",
@@ -135,8 +137,8 @@ def good_events(role="adaptive_luna_xhigh", effort="xhigh", *, root_model="gpt-6
                     "id": child,
                     "parentThreadId": "root",
                     "agentRole": role,
-                    "model": "gpt-6-luna",
-                    "reasoningEffort": effort,
+                    "model": role_model,
+                    "reasoningEffort": role_effort,
                     "status": {"type": "idle"},
                     "spawn": {
                         "parent_thread_id": "root",
@@ -151,6 +153,54 @@ def good_events(role="adaptive_luna_xhigh", effort="xhigh", *, root_model="gpt-6
 
 
 class VerifyPublicEventsTests(unittest.TestCase):
+    def test_terra_role_is_bound_to_exact_model_and_xhigh(self):
+        events = good_events("adaptive_terra_xhigh", "xhigh")
+        events[3:3] = self._collab_events(model="gpt-6.1-terra", effort="xhigh")
+        result = verify.validate_public_events(events, "adaptive_terra_xhigh")
+        self.assertTrue(result["ok"], result)
+
+        for field, value in (("model", "gpt-6-luna"), ("reasoningEffort", "max")):
+            with self.subTest(request_field=field):
+                mutated = deepcopy(events)
+                for event in mutated:
+                    if event.get("event") in ("item/started", "item/completed"):
+                        item = event.get("item", {})
+                        if item.get("tool") == "spawnAgent":
+                            item[field] = value
+                mismatch = verify.validate_public_events(mutated, "adaptive_terra_xhigh")
+                self.assertFalse(mismatch["ok"], mismatch)
+                self.assertTrue(any("spawn requested" in error for error in mismatch["errors"]))
+
+        child = next(event for event in events if event.get("event") == "child/public-metadata")
+        child["thread"]["model"] = "gpt-6-luna"
+        mismatch = verify.validate_public_events(events, "adaptive_terra_xhigh")
+        self.assertFalse(mismatch["ok"], mismatch)
+        self.assertTrue(any("model differs from selected role" in error for error in mismatch["errors"]))
+
+        events = good_events("adaptive_terra_xhigh", "xhigh")
+        child = next(event for event in events if event.get("event") == "child/public-metadata")
+        child["thread"]["reasoningEffort"] = "max"
+        mismatch = verify.validate_public_events(events, "adaptive_terra_xhigh")
+        self.assertFalse(mismatch["ok"], mismatch)
+        self.assertTrue(any("effort mismatch" in error for error in mismatch["errors"]))
+
+        for field, expected_error in (("model", "child effective model is not publicly observable"),
+                                      ("reasoningEffort", "child effective effort is not publicly observable")):
+            with self.subTest(missing_effective_field=field):
+                events = good_events("adaptive_terra_xhigh", "xhigh")
+                child = next(event for event in events if event.get("event") == "child/public-metadata")
+                child["thread"].pop(field)
+                mismatch = verify.validate_public_events(events, "adaptive_terra_xhigh")
+                self.assertFalse(mismatch["ok"], mismatch)
+                self.assertTrue(any(expected_error in error for error in mismatch["errors"]))
+
+    def test_unknown_or_crossed_role_is_rejected_before_identity_can_pass(self):
+        for role in ("adaptive_terra_max", "adaptive_luna_terra_xhigh", "gpt-6.1-terra"):
+            with self.subTest(role=role):
+                result = verify.validate_public_events(good_events(), role)
+                self.assertFalse(result["ok"], result)
+                self.assertIn("expected role is unsupported", result["errors"])
+
     def test_any_root_model_and_unknown_effort_remain_observable_evidence(self):
         for model, effort in (("gpt-6-astra", "low"), ("gpt-6.1-sol", "medium"),
                               ("gpt-6-luna", None), ("future-model", None), (None, None)):

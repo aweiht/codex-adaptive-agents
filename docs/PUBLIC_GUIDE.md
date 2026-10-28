@@ -1,6 +1,6 @@
 # Codex Adaptive Agents public operator guide
 
-**0.8.0 status: SOURCE_READY.** Codex Adaptive Agents uses the project
+**0.9.0 status: SOURCE_READY.** Codex Adaptive Agents uses the project
 repository at <https://github.com/aweiht/codex-adaptive-agents>. The package
 contains the Python source used at runtime. No new live model verification was
 requested for this revision. Consult [VALIDATION.md](VALIDATION.md) for current
@@ -55,7 +55,8 @@ py -3 .\codex-adaptive-agents.py --codex-home "$env:USERPROFILE\.codex" doctor
 The --yes flag applies a fresh managed plan. Add --plan-id HASH to bind a
 previously reviewed preview. Before writing, the installer
 checks the official CLI and GPT-6 Luna's five public child effort levels. Root
-model identity and reasoning effort are not plugin eligibility gates. It hashes managed inputs,
+model identity and reasoning effort are not plugin eligibility gates. Terra
+catalogue absence does not block Luna installation. It hashes managed inputs,
 creates a private backup, writes atomically, and verifies the result. It does
 not read authentication files or claim that the account can complete a live
 task.
@@ -141,6 +142,8 @@ The other local commands are:
 ~~~sh
 python3 codex-adaptive-agents.py select --project /path/to/project
 python3 codex-adaptive-agents.py select --project /path/to/project --explain
+python3 codex-adaptive-agents.py select --project /path/to/project --task-kind browser
+python3 codex-adaptive-agents.py select --project /path/to/project --task-kind computer --explain
 python3 codex-adaptive-agents.py refresh
 ~~~
 
@@ -156,7 +159,7 @@ unrestricted metadata and is not read by the selector. The plugin does not
 change the user's main model or reasoning effort.
 
 The root effort has no plugin whitelist or forced `max`; the official client
-chooses what it supports. `refresh` and `doctor` maintain/check child
+chooses what it supports. `refresh` and `doctor` maintain/check Luna child
 capabilities without consulting root identity.
 
 Each project keeps its policy cache in .codex-adaptive-agents/state; projects should
@@ -173,21 +176,48 @@ policy state. Both forms leave unrelated project caches intact. They do not
 retry a native child dispatch or establish quota recovery; if refresh fails,
 keep the actual error and do not loop.
 
-The child model is `gpt-6-luna`. If public sources have no usable scores for
-this exact model, the selector retains a still-valid verified cache or falls
-back to `xhigh` when the local capability catalogue supports it. Older Luna
-model scores and caches cannot select a GPT-6 Luna role. Missing model access
-or stale capabilities remain readiness failures, not scoring fallbacks. The
-result reports why fallback was used and does not claim a dynamic update succeeded.
+The default `general` route uses `gpt-6-luna`. If public sources have no usable
+scores for this exact model, the selector retains a still-valid verified cache
+or falls back to `xhigh` when the local capability catalogue supports it.
+Older Luna model scores and caches cannot select a GPT-6 Luna role. Missing
+Luna model access or stale capabilities remain readiness failures, not scoring
+fallbacks. The result reports why fallback was used and does not claim a
+dynamic update succeeded.
+
+Computer/browser routes use only the fixed `adaptive_terra_xhigh` role:
+`gpt-6.1-terra` with `xhigh`. They do not read Luna scores or Luna policy
+caches. The required 72-hour Terra sidecar is a separate file named
+`codex-adaptive-agents/terra-capabilities.json`; it binds the exact model,
+effort list, public catalogue observation time, source, and CLI version. The
+current and recorded CLI versions must match and both must be 0.159.0 or newer.
+Missing, corrupt, stale, unsupported, or conflicting Terra data blocks only
+the GUI route and tells the user to refresh. Old Luna schema-1/2 snapshots,
+including their root-model field and recorded executable path, never prove
+Terra capability.
+
+An explicit refresh first completes the Luna CLI/catalogue preflight, then
+updates the existing Luna snapshot and Terra sidecar. A failed core preflight
+does not write a new Terra observation. The sidecar is public capability data,
+not an executable or receipt-owned path: upgrade, rollback, and uninstall leave
+it in place, and a 0.8.0 runtime ignores it. An explicit `refresh` is the repair
+path for a malformed or stale sidecar; selection remains read-only.
+
+The selector returns a role; it does not launch an agent, grant computer use,
+or enforce host permissions or global concurrency. A GUI work package has one
+Terra owner, who must not delegate further. Use Terra only for a package that
+must inspect or operate a real browser page or desktop application. Code,
+HTTP/API, or text work remains `general`, even if task text mentions a browser.
 
 ## Delegation gate
 
 The root agent owns requirements, key decisions, public interfaces,
 coordination, and final acceptance. Before substantive work starts, it does
-only enough exploration to identify the boundary. A safe work package with an
-explicit goal, boundary, artifact or problem ownership, and checkable acceptance
-must be handed to a native Luna child when the host permits it, before that
-package starts. This is a trial routing policy: it has no total-cost, elapsed-time, or
+only enough exploration to identify the boundary. A safe general work package
+with an explicit goal, boundary, artifact or problem ownership, and checkable
+acceptance must be handed to a native Luna child when the host permits it,
+before that package starts. A package requiring real browser or desktop
+interaction uses one Terra owner. This is a trial routing policy: it has no
+total-cost, elapsed-time, or
 token-saving threshold, no 2:8 (or other) delegation ratio, and no usage-
 collection system. An explicit user request to delegate is honored within host
 permissions; a verbal split or a child added after the work is complete is not
@@ -222,8 +252,9 @@ safe independent boundary, or an explicit no-delegation request. Do not split a
 substantive batch into small edits to avoid this assessment. Independent
 packages may run in parallel; dependent packages run serially. Shared browser,
 database, GUI, port, or build-output resources have one owner and are serialized
-when needed. One task uses no more than five direct Luna children, and agents
-are not started merely to satisfy a ratio or create duplicate work.
+when needed. A session uses no more than five direct children in total. General
+work uses Luna; a real GUI package uses one Terra owner. Agents are not started
+merely to satisfy a ratio or create duplicate work.
 
 | Example | Expected route |
 | --- | --- |
@@ -385,17 +416,26 @@ py -3 $Entry --codex-home $CodexHome process-cleanup --project C:\path\to\projec
 ## Live verification
 
 verify --live is explicit, uses real Codex allowance, and starts at most two
-direct native Luna children with the selected role. It is bounded at 600
-seconds. By default it sends no root model or effort override and does not
-gate on root identity. Optional `--root-model` and `--root-effort` values are
-explicit request overrides and must exactly match the public effective values
-before a turn starts. Missing or null public root fields remain unknown; no
-plugin effort allowlist applies.
+direct native children with the selected role. It is bounded at 600 seconds.
+By default it uses the Luna role selected by the ordinary policy, sends no root
+model or effort override, and does not gate on root identity. Optional
+`--role adaptive_terra_xhigh` explicitly verifies public Terra dispatch identity;
+it requires the installed Terra role, a fresh matching Terra capability
+snapshot, and Codex CLI 0.159.0 or later before any turn starts. This check does
+not exercise browser or desktop operations. Optional `--root-model` and
+`--root-effort` values are explicit request overrides and must exactly match
+the public effective values before a turn starts. Missing or null public root
+fields remain unknown; no plugin effort allowlist applies.
 
 ~~~sh
 python3 codex-adaptive-agents.py verify --live \
   --project /path/to/smoke-project \
   --output /path/to/verification-output
+
+# Explicit Terra dispatch-identity verification (not a GUI-operation test)
+python3 codex-adaptive-agents.py verify --live --role adaptive_terra_xhigh \
+  --project /path/to/smoke-project \
+  --output /path/to/terra-verification-output
 ~~~
 
 The CLI uses the official client's own defaults; it does not read a separate

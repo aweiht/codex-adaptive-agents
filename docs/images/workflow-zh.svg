@@ -17,11 +17,11 @@
 <rect x="470" y="225" width="45" height="40" rx="9" fill="#00FFCC"/>
 <text x="483" y="252" fill="#10171D" font-size="25" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">2</text>
 <text x="530" y="251" fill="#00FFCC" font-size="22" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">使用</text>
-<text x="470" y="311" fill="#F3F7F9" font-size="25" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">打开新的 Codex 任务</text>
-<text x="470" y="360" fill="#F3F7F9" font-size="23" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">正常描述需求</text>
-<text x="470" y="398" fill="#F3F7F9" font-size="23" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">主 Agent 规划与最终验收</text>
-<text x="470" y="436" fill="#F3F7F9" font-size="23" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">按需使用 0–5 个 Luna</text>
-<text x="470" y="471" fill="#B9C8D2" font-size="19" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">小任务可由主 Agent 直接完成</text>
+<text x="470" y="311" fill="#F3F7F9" font-size="25" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">按实际工具选择路由</text>
+<text x="470" y="360" fill="#F3F7F9" font-size="23" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">general → Luna 五档策略</text>
+<text x="470" y="398" fill="#F3F7F9" font-size="23" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">computer/browser → Terra xhigh</text>
+<text x="470" y="436" fill="#F3F7F9" font-size="23" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">GUI 工作包由一人执行</text>
+<text x="470" y="471" fill="#B9C8D2" font-size="19" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">选档不会自动派发 Agent</text>
 <rect x="848" y="203" width="384" height="290" rx="16" fill="#1A252E"/>
 <rect x="870" y="225" width="45" height="40" rx="9" fill="#00FFCC"/>
 <text x="883" y="252" fill="#10171D" font-size="25" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">3</text>
@@ -31,5 +31,5 @@
 <text x="870" y="398" fill="#F3F7F9" font-size="23" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">select：选择执行角色</text>
 <text x="870" y="436" fill="#F3F7F9" font-size="23" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">verify --live：真实任务</text>
 <text x="870" y="471" fill="#B9C8D2" font-size="19" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">真实验收会使用模型额度</text>
-<text x="48" y="554" fill="#B9C8D2" font-size="22" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">使用流程示意；是否委派及实际人数由任务决定。</text>
+<text x="48" y="554" fill="#B9C8D2" font-size="22" font-family="Arial, Hiragino Sans GB, Microsoft YaHei, sans-serif">流程示意；需要 GUI 时由主控为当前任务显式选路由。</text>
 </svg>

@@ -1,10 +1,10 @@
-# Codex Adaptive Agents 0.8.0
+# Codex Adaptive Agents 0.9.0
 
-**让主 Agent 按当前子模型能力选择 Luna 角色，负责规划与验收。**
+**通用任务选 Luna 档位，真实电脑/浏览器操作包选 Terra `xhigh`，由主 Agent 负责规划与验收。**
 
 [English](README.md) · 简体中文 · [验证记录](docs/VALIDATION.md) · [操作指南](docs/PUBLIC_GUIDE.md)
 
-Codex Adaptive Agents 是一个为 Codex 安装协作规则、原生 Agent 角色和每日选档脚本的开源项目。安装后，继续在 Codex 中提出需求：主 Agent 判断是否值得委派，需要时使用 0–5 个 Luna 子 Agent，最后检查结果并回复。它没有独立网页或聊天窗口。
+Codex Adaptive Agents 是一个为 Codex 安装协作规则、原生 Agent 角色和选档脚本的开源项目。安装后，继续在 Codex 中提出需求：通用工作按现有 Luna 五档策略选角色；确实要操作浏览器或桌面应用时，使用单个 Terra `xhigh` owner。主 Agent 规划、检查结果并回复。它没有独立网页或聊天窗口。
 
 安装器、选档策略和验收逻辑均由本仓库实现，无需安装其他 Agent 编排项目。具体模块与外部数据输入见[实现说明](docs/UPSTREAM.md)。
 
@@ -16,13 +16,13 @@ Codex Adaptive Agents 是一个为 Codex 安装协作规则、原生 Agent 角�
 
 ### 第一步：复制这段，让 Codex 安装
 
-安装会将子模型设为 `gpt-6-luna`，默认思考强度为 `xhigh`，并安装五个角色和协作规则；主窗口的模型、思考强度和其他配置保留。
+安装会将通用子模型设为 `gpt-6-luna`，默认思考强度为 `xhigh`，安装五个 Luna 角色、一个独立 Terra `xhigh` 角色和协作规则；主窗口的模型、思考强度和其他配置保留。
 
 ```text
 请从 Codex Adaptive Agents 的项目仓库为我安装：
 https://github.com/aweiht/codex-adaptive-agents
 保留已有修改。阅读项目 README.zh-CN.md，使用当前 Codex 已在使用的 CODEX_HOME，通过源码目录中的准确 codex-adaptive-agents.py 入口运行；macOS/Linux 用 Python 3.11+ 的 `python3 codex-adaptive-agents.py`，Windows 用 `py -3 .\codex-adaptive-agents.py`。
-安装 Codex Adaptive Agents 的受管运行时、五个 adaptive_luna_* 角色和规则，同时保留其他设置、角色、备份与文件。
+安装 Codex Adaptive Agents 的受管运行时、五个 adaptive_luna_* 角色、adaptive_terra_xhigh 角色和规则，同时保留其他设置、角色、备份与文件。
 先运行 `install --dry-run` 并检查计划，再严格用返回的 `<plan_id>` 执行 `install --yes --plan-id <plan_id>`。随后运行 `doctor`；只有能力快照或选档缓存过期时才运行 `refresh`，再检查一次。
 请实际完成安装并报告源码路径、CODEX_HOME、计划结果和 doctor 状态。只有安装完成且 doctor 为 READY 或 READY_FALLBACK 才算成功。此步不要运行 verify --live 或任何模型任务；依赖、登录、权限或冲突需我处理时给出具体原因。
 ```
@@ -35,7 +35,7 @@ https://github.com/aweiht/codex-adaptive-agents
 请验证本机 Codex Adaptive Agents 是否安装成功：
 https://github.com/aweiht/codex-adaptive-agents
 使用当前 Codex 的 CODEX_HOME，找到 `CODEX_HOME/codex-adaptive-agents/runtime/codex-adaptive-agents.py`。用 Python 3.11+（macOS/Linux 用 `python3`，Windows 用 `py -3`）通过这个已安装入口运行 `python3 "$CODEX_HOME/codex-adaptive-agents/runtime/codex-adaptive-agents.py" --codex-home "$CODEX_HOME" doctor`（Windows 使用对应的 `py -3` 命令），再在独立临时目录运行 `select --project <临时目录> --explain`。不需要主模型参数或人工确认。
-只有 doctor 报告子模型能力快照或选档缓存过期时才运行 `refresh`，然后再次检查 doctor；如果本机 Luna 能力和策略数据有效，核对选档返回已安装的 `adaptive_luna_*` 角色。
+doctor 报告 Luna 能力快照或选档缓存过期时，运行 `refresh` 并再次检查 doctor。电脑/浏览器路由还应分别运行 `select --task-kind computer --explain` 或 `select --task-kind browser --explain`；若报告 Terra sidecar 缺失、过期或 CLI 来源不匹配，就显式运行 `refresh` 并重试对应选档。Terra refresh 不要求 doctor 先变成 `NOT_READY`，因为 doctor 只检查 Luna 本地安装路径。普通选择应返回已安装的 `adaptive_luna_*` 角色；电脑/浏览器选择必须基于 fresh 且 CLI 匹配的 Terra 能力快照返回 `adaptive_terra_xhigh`。
 不要重新安装、修改业务文件、运行 verify --live、调用模型，也不要把选档当成已经调用子 Agent。根据 doctor 单独报告安装就绪状态，并展示实际状态和失败原因。
 ```
 
@@ -62,8 +62,9 @@ https://github.com/aweiht/codex-adaptive-agents
 ## 安装前准备
 
 - Python **3.11 或更新版本**。
-- 可运行的官方 Codex CLI **0.147.0 或更新版本**，以及支持原生自定义 Agent 的 Codex 客户端。CLI 的公开模型目录需要包含子模型 `gpt-6-luna` 的 `low / medium / high / xhigh / max` 五档。
-- 委派不按主模型身份筛选；安装和选档只检查 Luna 子模型能力与策略。
+- 可运行的官方 Codex CLI：Luna 路由要求 **0.147.0+**，Terra 电脑/浏览器路由要求 **0.159.0+**；还需支持原生自定义 Agent 的 Codex 客户端。CLI 公开模型目录需包含 `gpt-6-luna` 的 `low / medium / high / xhigh / max` 五档。
+- Terra 能力只在选择电脑/浏览器路线时检查；Terra 不可用不会阻断普通 Luna 选档。
+- 委派不按主模型身份筛选；安装和选档根据任务类型与准确子模型能力选择角色。
 - 日常使用和真实验收需要正常的 Codex 登录、所需模型访问权限及可用额度。安装检查模型目录，不代表账号一定能完成模型任务。
 - 网络能读取公开模型目录和选档数据源；用 Git 下载时还需 Git。也可以通过 GitHub 的 **Code → Download ZIP** 下载源码。
 
@@ -102,7 +103,7 @@ py -3 .\codex-adaptive-agents.py doctor
 
 `--dry-run` 仅用于 `install` 和 `uninstall`，展示改动计划；其他命令会在执行前拒绝该参数，包括 `verify --live` 和 `refresh`。`--yes` 应用当前计划并备份。默认安装目标是 `CODEX_HOME`，未设置时为用户目录下的 `.codex`。安装到已有 Codex 使用的同一个目录，避免把空白目录当成已登录环境。
 
-**安装会修改哪些内容？** 它设置 `gpt-6-luna` 子模型、默认 `xhigh` 和最多五个并发子 Agent，安装五个 Luna 角色、协作规则与 Python 运行脚本。其他配置、角色和规则保留；受管文件发生冲突时会拒绝覆盖。修改前先建立备份。
+**安装会修改哪些内容？** 它设置 `gpt-6-luna` 子模型、默认 `xhigh` 和最多五个并发子 Agent，安装五个 Luna 角色、专用 `adaptive_terra_xhigh` 角色、协作规则与 Python 运行脚本。其他配置、角色和规则保留；受管文件发生冲突时会拒绝覆盖。修改前先建立备份。
 
 使用不同 Codex home 或 CLI 路径时，把下面的参数加到命令中：
 
@@ -118,7 +119,37 @@ python3 codex-adaptive-agents.py --codex-home /path/to/codex-home --codex /path/
 
 主 Agent 负责需求、关键决策、公共接口、协调和最终验收。实质工作开工前只做足够确定边界的少量探索，使用者不需要手动启动 worker，也不必先运行选档命令。
 
-委派前脚本按**系统本地自然日**选择一个支持的 Luna 档位；项目缓存保存在 `.codex-adaptive-agents/state`。请将 `.codex-adaptive-agents/` 加入业务项目的 `.gitignore`。网站查不到 GPT-6 Luna 评分、请求失败或评分无法可靠比较时，默认回退到 `xhigh`；仍须通过本机模型能力检查，不保证降档、省钱或提速。
+主 Agent 按工作包实际工具分类后选角色。代码、HTTP/API 和文本工作用 `general`，按**系统本地自然日**和现有评分策略选择 Luna 档位；项目缓存保存在 `.codex-adaptive-agents/state`。真正要观察或操作浏览器页面时用 `browser`，要操作桌面应用时用 `computer`。仅在描述中出现“浏览器”一词不触发 Terra。请将 `.codex-adaptive-agents/` 加入业务项目的 `.gitignore`。网站查不到 GPT-6 Luna 评分、请求失败或评分无法可靠比较时，默认回退到 `xhigh`；仍须通过准确的本机模型能力检查，不保证降档、省钱或提速。
+
+一个 GUI 工作包由一个 Terra owner 执行，子 Agent 不向下委派。选择 Terra 不会授予浏览器或桌面权限，也不构成权限锁或全局并发锁；工具权限继承宿主实际配置。
+
+### 安装后的路由流程
+
+```mermaid
+flowchart TD
+    A[收到任务] --> B{是否简单任务或主控决策}
+    B -->|是| C[主 Agent 直接处理]
+    B -->|否| D{能否形成独立且有边界的工作包}
+    D -->|否| C
+    D -->|是| E{是否需要真实电脑或浏览器交互}
+    E -->|否| F[检查本机 Luna 五档能力与原选档策略]
+    F -->|通过| G[派发选中的 Luna 角色]
+    F -->|不通过| H[报告具体原因并暂停通用工作包]
+    E -->|是| I[检查已安装 Terra 角色、fresh 且 CLI 匹配的模型目录、CLI ≥ 0.159.0]
+    I -->|通过| J[使用 GPT-6.1 Terra xhigh，安排单一 GUI owner]
+    I -->|不通过| K[报告具体原因并暂停 GUI 工作包]
+    K --> L[修复阻塞条件后重查 Terra 能力]
+    L --> I
+    G --> M[原 owner 实现并完成验证]
+    J --> M
+    M --> N[主 Agent 复核并验收]
+    N -->|需要修改| O[普通修复返给原 owner]
+    O --> M
+    N -->|通过| P[交付]
+    C --> P
+```
+
+Luna 与 Terra 合计每个会话最多五个直接子 Agent，子 Agent 不再委派。此图描述安装后的流程，不证明宿主提供或已验证真实电脑/浏览器能力；Terra 检查失败时暂停该 GUI 工作包，修复条件后重查，不静默切换到 Luna。
 
 ### 主模型与实时验收参数
 
@@ -128,13 +159,13 @@ python3 codex-adaptive-agents.py --codex-home /path/to/codex-home --codex /path/
 
 ### 委派门槛与例子
 
-只要安全工作包具备明确目标、边界、产物或问题归属和可查证验收，用户未禁止且宿主允许，就必须先实际派发给 Luna，再开始该工作包。这个路由规则是试用策略，不承诺 token 更低或完成更快，不设总成本、耗时或预期节省门槛，不设 2:8 等固定比例，也不增加 usage 采集系统。不能把整批实质工作拆成多个“一次小改”来规避评估。
+只要通用安全工作包具备明确目标、边界、产物或问题归属和可查证验收，用户未禁止且宿主允许，就必须先按 Luna 策略选档并实际派发，再开始该工作包。真实 GUI 工作包由主 Agent 选 Terra `xhigh` 并安排单一 owner。这个路由规则是试用策略，不承诺 token 更低或完成更快，不设总成本、耗时或预期节省门槛，不设 2:8 等固定比例，也不增加 usage 采集系统。不能把整批实质工作拆成多个“一次小改”来规避评估。
 
 完整功能或 UI 诊断由同一叶子完成实现、相关辅助验证脚本、构建/测试/打包检查和普通失败修复；进入验证阶段不改变执行 owner，普通失败返给原叶子。只有公共接口变更、重大方案问题、合理修复后仍未解决，或能力/权限限制才升级主 Agent。主 Agent 定义验收标准和风险边界，在阶段交付时集中核查真实差异、关键证据及边界，并作最终验收判断；这不要求主 Agent 亲自执行每条验证命令或脚本。需要独立执行复核时，可另派无写冲突的 Luna 受限复核包，判断仍由主 Agent 负责，不要求每个任务增加复核者。主 Agent 在既有授权边界内独立核查高风险权限、真实数据与进程清理，并确认所需授权已经具备；不得推断或扩大授权，也不以叶子自述或退出码代替核查。简单问答、确实一次完成的小改、纯主控决策、没有安全独立边界的紧耦合依赖链，以及用户明确要求不委派时，可以直接完成。
 
-长测试、轮询、采样和常规失败处理都属于同一个 Luna 工作包，由脚本或宿主原生等待持续监测。阶段交付集中审查交接摘要、真实差异和定点产物，不因最终验收重复同一份完整探索或测试；主 Agent 不因进入验证或最终验收而接管执行。仅在证据矛盾、关键覆盖缺失或风险信号出现时扩大检查，必要的独立执行复核另设无写冲突的受限工作包。
+长测试、轮询、采样和常规失败处理都属于同一个工作包，由脚本或宿主原生等待持续监测。Terra 的 GUI owner 不向下委派。阶段交付集中审查交接摘要、真实差异和定点产物，不因最终验收重复同一份完整探索或测试；主 Agent 不因进入验证或最终验收而接管执行。仅在证据矛盾、关键覆盖缺失或风险信号出现时扩大检查，必要的独立执行复核另设无写冲突的受限工作包。
 
-独立工作包可以并行，有依赖时按顺序执行；共享 GUI、数据库、端口或构建目录只设一个 owner，需要时串行。单个任务最多五个直接 Luna 子 Agent，不为满足比例或制造重复任务而开 Agent。用户指定的数量或并行方式无法安全满足时，说明具体限制并请求调整，不能擅自改要求。
+独立工作包可以并行，有依赖时按顺序执行；共享 GUI、数据库、端口或构建目录只设一个 owner，需要时串行。单个会话最多五个直接子 Agent；通用任务使用 Luna，真实 GUI 工作包由一个 Terra owner 执行。不为满足比例或制造重复任务而开 Agent。用户指定的数量或并行方式无法安全满足时，说明具体限制并请求调整，不能擅自改要求。
 
 | 情况 | 做法 |
 | --- | --- |
@@ -175,11 +206,21 @@ python3 codex-adaptive-agents.py doctor
 python3 codex-adaptive-agents.py select --project .
 ```
 
-Windows 把 `python3` 换成 `py -3`。`doctor` 检查本地安装，不调用模型、不联网。`select` 只选择角色，必要时刷新公开数据；输出 `adaptive_luna_xhigh` 等角色名，**不会启动 Luna**。
+Windows 把 `python3` 换成 `py -3`。`doctor` 检查 Luna 本地安装，不调用模型、不联网。`select` 只选择角色，必要时刷新公开数据；输出 Luna 或 Terra 角色名，**不会启动 Agent**。
 
-![主模型无关的角色选档输出示例](docs/images/cli-check.svg)
+```sh
+python3 codex-adaptive-agents.py select --project /path/to/project --explain
+python3 codex-adaptive-agents.py select --project /path/to/project --task-kind browser --explain
+python3 codex-adaptive-agents.py select --project /path/to/project --task-kind computer
+```
 
-*这是主模型无关的本地选择器实际输出；使用临时安装和本地合成 fallback 缓存，不调用模型。*
+默认 `general` 走原有 Luna 五档选分策略。确实要操作浏览器页面时选 `browser`，要操作桌面应用时选 `computer`；代码、HTTP/API 和文本工作保持 `general`，即便任务文字提到浏览器。GUI 路由只会选 `gpt-6.1-terra` / `xhigh`，需要 fresh 的独立公共目录快照、以及至少 0.159.0 的 Codex CLI。缺少 Terra 模型、缺 `xhigh`、快照过期/冲突、快照 CLI 与当前版本不匹配时会阻止 Terra 选档，提示 `refresh`，不会回退 Luna。旧 Luna schema 1/2 快照不能证明 Terra 能力。
+
+Terra sidecar 位于 `CODEX_HOME/codex-adaptive-agents/terra-capabilities.json`，记录准确模型、effort、实际公共目录观测时间、来源和 CLI 版本。它不是可执行文件或安装收据所有权路径；升级、回滚、卸载会保留，0.8.0 runtime 会忽略它。修复损坏或过期 sidecar 要显式运行 `refresh`；如果 Luna CLI/目录预检失败，不会生成新的 Terra 观测。Terra 能力不可用不影响普通 Luna 选档。选中角色不会授予桌面权限、强制权限边界或锁定全局并发；GUI 工作包由一个 Terra owner 执行，不向下委派。
+
+![任务类型路由输出示意](docs/images/cli-check.svg)
+
+*这是隔离目录中的 CLI 路由输出；使用合成能力快照，不调用模型或真实 GUI。*
 
 | 输出 | 含义与下一步 |
 | --- | --- |
@@ -187,6 +228,7 @@ Windows 把 `python3` 换成 `py -3`。`doctor` 检查本地安装，不调用�
 | `READY_FALLBACK` | 本地检查通过，评分不可用，当前使用本机支持的 `xhigh` 回退档位；可继续使用。 |
 | `NOT_READY` | 检查未通过，查看 `errors`；缓存过期时运行 `refresh`，再运行 `doctor`。 |
 | `INSTALLED_NEEDS_REFRESH` | 文件已安装，但选档未准备好；运行 `refresh` 后重新检查。 |
+| Terra 选档显示 unavailable | 检查 `codex --version` 是否为 0.159.0+，然后显式运行一次 `refresh`；若公开目录仍不含 Terra `xhigh`，保持 GUI 路由不可用，Luna 可继续使用。 |
 
 ### 可选：验证真实原生委派
 
@@ -214,6 +256,8 @@ python3 codex-adaptive-agents.py verify --live
 
 该命令使用真实模型，最多启动两个直接 Luna 子 Agent，整个检查有 600 秒上限。它检查真实输出、角色、文件范围和验收契约，完整通过才返回 `LIVE_VERIFIED`。失败时按输出排查，不能把 `doctor` 通过当成这一步通过。
 
+需要单独核对 Terra 派发身份时，可在 `verify --live` 中显式添加 `--role adaptive_terra_xhigh`。运行前必须有已安装的 Terra 角色、与当前 CLI 匹配且未过期的 Terra 能力快照，并使用 Codex CLI 0.159.0 或更新版本；该检查不执行或验证真实电脑/浏览器操作。
+
 验证时会临时打开官方 stdio app-server 通道，结束后关闭；不会安装常驻服务。可通过 `--project PATH --output PATH` 指定新的独立验收目录和结果目录，避免使用已有业务目录。
 
 ## 常见问题
@@ -227,7 +271,7 @@ python3 codex-adaptive-agents.py verify --live
 | 某个项目同一天选档失败后仍被阻塞 | 查看诊断，只运行一次 `python3 codex-adaptive-agents.py refresh --project /path/to/project`，再对同一项目运行 `select --explain`；不带 `--project` 的 `refresh` 只更新 home 级策略。此命令更新选档输入，不重试原生派发，也不能证明配额已恢复。 |
 | 修改过受管角色后升级失败 | 保留改动，检查冲突并决定如何合并；不要直接覆盖文件或安装凭据。 |
 | 安装后没有使用 Luna | 先开始新 Codex 任务；简单任务直接完成是正常情况。需要独立验收时使用显式的 `verify --live`。 |
-| Windows / Linux 的真实模型任务是否已验证？ | 本轮没有请求新的 live 模型验收；历史 CI 只对其具体提交有效，不代表当前 0.8.0。详见[验证记录](docs/VALIDATION.md)。 |
+| Windows / Linux 的真实模型任务是否已验证？ | 本轮没有请求真实 GUI 操作或 live 模型验收；历史 CI 只对其具体提交有效，不代表当前 0.9.0。详见[验证记录](docs/VALIDATION.md)。 |
 
 ## 更新、卸载与恢复
 
@@ -262,10 +306,10 @@ python3 codex-adaptive-agents.py uninstall --yes
 
 ```sh
 python3 -m unittest discover -s tests_python -p 'test_*.py' -v
-python3 scripts/release_python.py --output-dir dist/0.8.0-python
+python3 scripts/release_python.py --output-dir dist/0.9.0-python
 ```
 
-打包目录须是新的，脚本不会覆盖已有发行包。源码包包含中英文文档、运行图片、测试和校验和。本轮 0.8.0 的证据受具体源码修订和环境限制；没有请求新的 live 模型验收，历史 CI 也不代表当前源码。详见[验证记录](docs/VALIDATION.md)与[贡献指南](CONTRIBUTING.md)。
+打包目录须是新的，脚本不会覆盖已有发行包。源码包包含中英文文档、运行图片、测试和校验和。本轮 0.9.0 仅做离线代码、隔离运行和软件包验证；没有真实 Terra GUI 或 live 模型验收。详见[验证记录](docs/VALIDATION.md)与[贡献指南](CONTRIBUTING.md)。
 
 ## 许可与实现
 

@@ -1,14 +1,16 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="590" viewBox="0 0 1500 590">
-<rect width="1500" height="590" rx="24" fill="#101b25"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="650" viewBox="0 0 1500 650">
+<rect width="1500" height="650" rx="24" fill="#101b25"/>
 <path d="M54 139 H1446" stroke="#374957"/>
-<text x="54" y="67" fill="#ffffff" font-family="sans-serif" font-size="32" font-weight="700">Codex Adaptive Agents 0.8.0</text>
-<text x="54" y="110" fill="#b7c6d0" font-family="sans-serif" font-size="22">Root-independent selection · Luna child policy only</text>
-<text x="54" y="195" fill="#00ffcc" font-family="monospace" font-size="22">$ python3 codex-adaptive-agents.py select --project &lt;temporary-project&gt; --explain</text>
-<text x="54" y="235" fill="#edf3f7" font-family="monospace" font-size="22">{</text>
-<text x="54" y="274" fill="#edf3f7" font-family="monospace" font-size="22">  &quot;status&quot;: &quot;fallback&quot;,</text>
-<text x="54" y="313" fill="#edf3f7" font-family="monospace" font-size="22">  &quot;role&quot;: &quot;adaptive_luna_xhigh&quot;,</text>
-<text x="54" y="352" fill="#edf3f7" font-family="monospace" font-size="22">  &quot;effort&quot;: &quot;xhigh&quot;,</text>
-<text x="54" y="391" fill="#edf3f7" font-family="monospace" font-size="22">  &quot;refreshed&quot;: false</text>
-<text x="54" y="430" fill="#edf3f7" font-family="monospace" font-size="22">}</text>
-<text x="54" y="520" fill="#b7c6d0" font-family="sans-serif" font-size="19">2026-09-30 · Actual isolated source CLI · Synthetic child cache · No network or model task</text>
+<text x="54" y="67" fill="#ffffff" font-family="sans-serif" font-size="32" font-weight="700">Codex Adaptive Agents 0.9.0</text>
+<text x="54" y="110" fill="#b7c6d0" font-family="sans-serif" font-size="22">General work → Luna · Real computer/browser work → Terra xhigh</text>
+<text x="54" y="195" fill="#00ffcc" font-family="monospace" font-size="21">$ python3 codex-adaptive-agents.py select --project &lt;temporary-project&gt; --task-kind browser --explain</text>
+<text x="54" y="240" fill="#edf3f7" font-family="monospace" font-size="22">{</text>
+<text x="54" y="282" fill="#edf3f7" font-family="monospace" font-size="22">  &quot;status&quot;: &quot;ready&quot;,</text>
+<text x="54" y="324" fill="#edf3f7" font-family="monospace" font-size="22">  &quot;task_kind&quot;: &quot;browser&quot;,</text>
+<text x="54" y="366" fill="#edf3f7" font-family="monospace" font-size="22">  &quot;role&quot;: &quot;adaptive_terra_xhigh&quot;,</text>
+<text x="54" y="408" fill="#edf3f7" font-family="monospace" font-size="22">  &quot;model&quot;: &quot;gpt-6.1-terra&quot;,</text>
+<text x="54" y="450" fill="#edf3f7" font-family="monospace" font-size="22">  &quot;effort&quot;: &quot;xhigh&quot;,</text>
+<text x="54" y="492" fill="#edf3f7" font-family="monospace" font-size="22">  &quot;capability_source&quot;: &quot;public_client_catalogue&quot;</text>
+<text x="54" y="534" fill="#edf3f7" font-family="monospace" font-size="22">}</text>
+<text x="54" y="604" fill="#b7c6d0" font-family="sans-serif" font-size="18">2026-10-28 · Isolated 0.9.0 install · Synthetic public catalogue · No network or model task</text>
 </svg>

@@ -222,6 +222,18 @@ def hashes(project):
     return {name: install.sha(read(project / name)) for name in sorted(wanted)}
 
 
+def _require_terra_role_ready(home, codex, project):
+    from . import policy
+    receipt = install.validate(home)
+    if receipt is None or f'agents/{install.TERRA_ROLE}.toml' not in receipt.get('owned_files', {}):
+        raise RuntimeError('Terra role is not installed; upgrade before verification')
+    selection = policy.select_task_kind(home, project, 'computer', codex=codex)
+    if selection.get('role') != install.TERRA_ROLE:
+        reasons = selection.get('reasons') or []
+        details = '; '.join(reason for reason in reasons if isinstance(reason, str))
+        raise RuntimeError(details or 'Terra capability unavailable; run refresh')
+
+
 def run(home, codex, project, output, role=None, *, root_model=None, root_effort=None, select_role=None):
     from . import verify
     home, project, output = (Path(x) for x in (home, project, output))
@@ -236,8 +248,10 @@ def run(home, codex, project, output, role=None, *, root_model=None, root_effort
     session = None
     prepared = False
     try:
-        if role is not None and role not in ('adaptive_luna_' + e for e in install.EFFORTS):
+        if role is not None and verify.role_model_effort(role) is None:
             raise RuntimeError('unsupported role')
+        if role == install.TERRA_ROLE:
+            _require_terra_role_ready(home, codex, project)
         if root_effort is not None and (not isinstance(root_effort,str) or not root_effort.strip()):
             raise RuntimeError('requested root effort must be nonempty')
         if contains(project, output) or contains(output, project) or contains(project, entry):
@@ -306,17 +320,22 @@ def run(home, codex, project, output, role=None, *, root_model=None, root_effort
             if isinstance(selection,dict):
                 raise RuntimeError('child role selection unavailable')
             role=selection
-        if role not in ('adaptive_luna_' + e for e in install.EFFORTS):
+        role_contract = verify.role_model_effort(role)
+        if role_contract is None:
             raise RuntimeError('child role selection unavailable')
+        if role == install.TERRA_ROLE:
+            _require_terra_role_ready(home, codex, project)
+        role_model, role_effort = role_contract
         prompt=('Follow contract.md. Spawn exactly two direct native leaf subagents concurrently using agent_type '+role+
             '. You must not implement the functions yourself. One child owns only '+str(project/'normalize_tags.py')+
             ' and the other owns only '+str(project/'unique_numbers.py')+'. Give both the full contract, exact file ownership and absolute cwd '+str(project)+
             '. State that other collaborators are present and their work must be preserved. Children must not delegate or launch CLI workers. '+
             'Use Python 3.11 standard library only; no shell-specific scripts, Go, dependencies, network, sleeps, extra files or tests. '+
-            'AGENTS.md and contract.md are immutable. The selector already selected '+role+'; do not rerun it. '+
+            'AGENTS.md and contract.md are immutable. The selector already selected '+role+' ('+role_model+' at '+role_effort+'); do not rerun it. '+
             'Wait until both children complete and stop writing. The external verifier runs independent tests after your final reply. '+
-            'Do not add reports or caches. This explicitly authorizes two real native Luna tasks.')
-        print('Starting two native Luna tasks (up to 600 seconds); this uses Codex allowance.', file=sys.stderr)
+            'Do not add reports or caches. This explicitly authorizes two real native '+role_model+' tasks. '
+            'This is a dispatch and public identity check only; it does not exercise or verify GUI/browser operations.')
+        print('Starting two native '+role_model+' tasks (up to 600 seconds); this uses Codex allowance.', file=sys.stderr)
         session.call('turn/start',{'threadId':session.root,'input':[{'type':'text','text':prompt}]})
         while not session.completed:
             session.receive()
@@ -345,7 +364,9 @@ def run(home, codex, project, output, role=None, *, root_model=None, root_effort
             raise RuntimeError('artifacts changed during validation')
         if trusted!={name:install.sha(read(entry.parent/name)) for name in install.RUNTIME_FILES}:
             raise RuntimeError('trusted verifier source changed')
-        result.update(status='LIVE_VERIFIED',independent_test=finalcheck,artifact_sha256=after,selected_role=role)
+        result.update(status='LIVE_VERIFIED',independent_test=finalcheck,artifact_sha256=after,selected_role=role,
+                      selected_role_model=role_model,selected_role_effort=role_effort,
+                      gui_operation_verified=False)
     except (ValueError, RuntimeError, OSError, KeyError, TypeError) as error:
         result['error']=str(error) if type(error) is RuntimeError else 'verification input or stream failed'
     finally:

@@ -8,6 +8,7 @@ import sys
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from codex_adaptive_agents import policy
@@ -29,6 +30,8 @@ class PolicyTests(unittest.TestCase):
         self.home.mkdir()
         self.project = Path(self.temp.name).resolve() / "project"
         self.project.mkdir()
+        self.codex = str(Path(self.temp.name).resolve() / "codex")
+        self.other_codex = str(Path(self.temp.name).resolve() / "other" / "codex")
         self.now = datetime(2026, 9, 15, 12, 0, tzinfo=UTC)
 
     def snapshot(self, checked_at, *, codex=None, efforts=None, root_model="gpt-6-astra"):
@@ -84,6 +87,28 @@ class PolicyTests(unittest.TestCase):
         path = state / "policy-cache.json"
         path.write_text(json.dumps(cache), encoding="utf-8")
         return path
+
+    def terra_snapshot(self, *, checked_at=None, efforts=None, cli_version="codex-cli 0.159.0",
+                       catalogue_status="available", codex=None):
+        resource = self.home / policy.RESOURCE
+        resource.mkdir(parents=True, exist_ok=True)
+        value = {
+            "schema": 1,
+            "model": "gpt-6.1-terra",
+            "checked_at": policy._stamp(checked_at or self.now),
+            "supported_efforts": ["low", "medium", "high", "xhigh"] if efforts is None else efforts,
+            "catalogue_status": catalogue_status,
+            "codex": codex or self.codex,
+            "cli_version": cli_version,
+            "evidence": "public_client_catalogue",
+        }
+        path = resource / "terra-capabilities.json"
+        path.write_text(json.dumps(value), encoding="utf-8")
+        return path
+
+    def fake_cli_version(self, value="codex-cli 0.159.0"):
+        return patch.object(policy, "_run_codex", return_value=SimpleNamespace(
+            returncode=0, stdout=(value + "\n").encode("utf-8")))
 
     def test_source_json_rejects_duplicates_and_bad_timestamps(self):
         with self.assertRaises(policy.PolicyError):
@@ -697,6 +722,91 @@ class PolicyTests(unittest.TestCase):
                 patch.object(policy, "ZoneInfo", side_effect=KeyError("database absent")):
             with self.assertRaisesRegex(policy.PolicyError, 'unset TZ'):
                 policy._system_timezone(self.now)
+
+    def test_computer_and_browser_route_only_to_exact_fresh_terra_capability(self):
+        self.terra_snapshot()
+        for task_kind in ("computer", "browser"):
+            with self.subTest(task_kind=task_kind), self.fake_cli_version(), \
+                    patch.object(policy, "DirectSupportedEfforts",
+                                 side_effect=AssertionError("Terra route must not read Luna cache")), \
+                    patch.object(policy, "FetchSources",
+                                 side_effect=AssertionError("Terra route must not score Luna")):
+                selected = policy.select_task_kind(self.home, self.project, task_kind,
+                                                   codex=self.codex, now=self.now)
+            self.assertEqual((selected["role"], selected["model"], selected["effort"]),
+                             ("adaptive_terra_xhigh", "gpt-6.1-terra", "xhigh"))
+            self.assertEqual(selected["task_kind"], task_kind)
+            self.assertEqual(selected["capability_source"], "public_client_catalogue")
+
+    def test_old_luna_snapshot_and_model_provenance_never_prove_terra(self):
+        path, _ = self.snapshot(self.now, root_model="gpt-6.1-terra")
+        value = json.loads(path.read_text(encoding="utf-8"))
+        value["cli_version"] = "codex-cli 0.159.0"
+        value["codex"] = "/path/with/terra/in/name"
+        path.write_text(json.dumps(value), encoding="utf-8")
+        with self.fake_cli_version():
+            selected = policy.select_task_kind(self.home, self.project, "computer",
+                                               codex=self.codex, now=self.now)
+        self.assertEqual(selected["role"], "")
+        self.assertIn("Terra capability snapshot unavailable; run refresh", selected["reasons"])
+        self.assertFalse((self.home / policy.RESOURCE / "terra-capabilities.json").exists())
+
+    def test_terra_route_blocks_stale_unsupported_conflicting_or_cli_mismatched_capabilities(self):
+        cases = (
+            ("stale", dict(checked_at=self.now - timedelta(hours=73)), "expired"),
+            ("xhigh unsupported", dict(efforts=["low", "medium", "high"]), "does not support gpt-6.1-terra xhigh"),
+            ("duplicate declaration", dict(efforts=[], catalogue_status="conflict"), "conflicting gpt-6.1-terra"),
+            ("snapshot old CLI", dict(cli_version="codex-cli 0.158.0"), "snapshot was recorded by Codex CLI older"),
+            ("snapshot version mismatch", dict(cli_version="codex-cli 0.160.0"), "differs from the current CLI"),
+            ("snapshot source path mismatch", dict(codex=self.other_codex), "path differs from the current CLI"),
+        )
+        for label, snapshot_args, expected in cases:
+            with self.subTest(label=label):
+                self.terra_snapshot(**snapshot_args)
+                with self.fake_cli_version():
+                    selected = policy.select_task_kind(self.home, self.project, "browser",
+                                                       codex=self.codex, now=self.now)
+                self.assertEqual(selected["role"], "")
+                self.assertIn(expected, selected["reasons"][0])
+                (self.home / policy.RESOURCE / "terra-capabilities.json").unlink()
+
+        self.terra_snapshot()
+        with self.fake_cli_version("codex-cli 0.158.0"):
+            old_cli = policy.select_task_kind(self.home, self.project, "computer",
+                                              codex=self.codex, now=self.now)
+        self.assertEqual(old_cli["role"], "")
+        self.assertIn("requires Codex CLI 0.159.0 or later", old_cli["reasons"][0])
+
+    def test_catalogue_preflight_binds_separate_terra_sidecar_and_luna_remains_usable(self):
+        catalog = {
+            "models": [
+                {"slug": "gpt-6-luna", "supported_reasoning_levels": [
+                    {"effort": effort} for effort in EFFORTS]},
+                {"slug": "gpt-6.1-terra", "supported_reasoning_levels": [
+                    {"effort": effort} for effort in ["low", "medium", "high", "xhigh"]]},
+                {"slug": "gpt-6.1-terra", "supported_reasoning_levels": [
+                    {"effort": effort} for effort in ["low", "medium", "high", "max"]]},
+            ]
+        }
+        calls = []
+
+        def fake_run(_home, argv, **_kwargs):
+            calls.append(argv)
+            raw = (b"codex-cli 0.159.0\n" if argv[-1] == "--version" else
+                   json.dumps(catalog).encode("utf-8"))
+            return SimpleNamespace(returncode=0, stdout=raw)
+
+        with patch.object(policy, "_run_codex", side_effect=fake_run):
+            snapshots = policy.preflight_all(self.home, self.codex, now=self.now)
+        self.assertEqual([call[1:] for call in calls], [["--version"], ["debug", "models"]])
+        self.assertEqual(snapshots["luna"]["schema"], 2)
+        self.assertEqual(snapshots["luna"]["supported_efforts"], EFFORTS)
+        self.assertEqual(snapshots["terra"]["model"], "gpt-6.1-terra")
+        self.assertEqual(snapshots["terra"]["supported_efforts"], [])
+        self.assertEqual(snapshots["terra"]["catalogue_status"], "conflict")
+        self.assertEqual(snapshots["terra"]["checked_at"], policy._stamp(self.now))
+        self.assertEqual(snapshots["terra"]["cli_version"], "codex-cli 0.159.0")
+        self.assertEqual(snapshots["terra"]["evidence"], "public_client_catalogue")
 
 
 if __name__ == "__main__":

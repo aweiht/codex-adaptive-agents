@@ -68,6 +68,8 @@ def parser():
     value.add_argument('--codex-home')
     value.add_argument('--codex', help='official Codex CLI path')
     value.add_argument('--project')
+    value.add_argument('--task-kind', help='select routing task kind: general, computer, or browser')
+    value.add_argument('--role', help='explicit role to verify with --live')
     value.add_argument('--output')
     value.add_argument('--backup', help='recorded transaction path; required for rollback only')
     value.add_argument('--plan-id')
@@ -130,6 +132,13 @@ def main(argv=None):
             raise ValueError('--root-effort is only valid for verify')
         if args.root_effort is not None and not args.root_effort.strip():
             raise ValueError('--root-effort must be nonempty')
+        if args.task_kind is not None and command != 'select':
+            raise ValueError('--task-kind is only valid for select')
+        if args.role is not None and command != 'verify':
+            raise ValueError('--role is only valid for verify')
+        task_kind = 'general' if args.task_kind is None else args.task_kind
+        if task_kind not in ('general', 'computer', 'browser'):
+            raise ValueError('--task-kind must be general, computer, or browser')
         if child_argv is not None and command != 'process-run':
             raise ValueError('command arguments after -- are only valid for process-run')
         if command.startswith('process-'):
@@ -190,14 +199,27 @@ def main(argv=None):
                 show(plan)
                 return 0
             expected = args.plan_id or plan['plan_id']
-            snapshot = None
+            snapshots = None
             if not uninstall:
                 from . import policy
                 codex = resolve_codex(home, args.codex)
-                snapshot = policy.preflight(home, codex)
+                snapshots = policy.preflight_all(home, codex)
             result = install.apply(home, expected, uninstall)
-            if snapshot is not None:
-                atomic(home / install.RESOURCE / 'capabilities.json', encode(snapshot))
+            if snapshots is not None:
+                try:
+                    atomic(home / install.RESOURCE / 'capabilities.json', encode(snapshots['luna']))
+                except (OSError, ValueError):
+                    result.update(status='INSTALLED_NEEDS_REFRESH', next_step='run refresh',
+                                  capability_snapshot_status='luna_write_failed', live_verified=False)
+                    show(result)
+                    return 1
+                try:
+                    atomic(home / install.RESOURCE / 'terra-capabilities.json', encode(snapshots['terra']))
+                except (OSError, ValueError):
+                    result.update(status='INSTALLED_NEEDS_REFRESH', next_step='run refresh',
+                                  capability_snapshot_status='terra_write_failed', live_verified=False)
+                    show(result)
+                    return 1
                 try:
                     selected = policy.select(home, force=True, codex=codex)
                     if selected.get('role') not in ('adaptive_luna_' + e for e in install.EFFORTS):
@@ -224,10 +246,24 @@ def main(argv=None):
                 raise ValueError('leaf workers must not refresh or delegate')
         if command == 'select':
             project = Path(os.path.abspath(args.project or os.getcwd()))
-            codex = resolve_codex(home, args.codex) if args.codex else None
-            selected = policy.select(home, project, codex=codex)
-            if selected.get('role') not in ('adaptive_luna_' + e for e in install.EFFORTS):
+            if task_kind == 'general':
+                codex = resolve_codex(home, args.codex) if args.codex else None
+                selected = policy.select(home, project, codex=codex)
+            else:
+                if f'agents/{install.TERRA_ROLE}.toml' not in receipt.get('owned_files', {}):
+                    raise ValueError('Terra role is not installed; upgrade to 0.9.0 before computer/browser routing')
+                codex = resolve_codex(home, args.codex)
+                selected = policy.select_task_kind(home, project, task_kind, codex=codex)
+            if task_kind == 'general' and selected.get('role') not in (
+                    'adaptive_luna_' + e for e in install.EFFORTS):
                 raise ValueError('selection unavailable; run refresh; no role dispatched')
+            if task_kind != 'general' and selected.get('role') != install.TERRA_ROLE:
+                reasons = selected.get('reasons') or []
+                if args.explain:
+                    show(selected)
+                    return 1
+                message = '; '.join(reason for reason in reasons if isinstance(reason, str))
+                raise ValueError(message or 'selection unavailable; run refresh; no role dispatched')
             if args.explain:
                 show(selected)
             else:
@@ -249,6 +285,26 @@ def main(argv=None):
             if not args.live:
                 raise ValueError('verify requires --live; it uses real Codex allowance')
             codex = resolve_codex(home, args.codex)
+            requested_role = args.role
+            if requested_role is not None:
+                from . import verify
+                role_contract = verify.role_model_effort(requested_role)
+                if role_contract is None:
+                    raise ValueError('unsupported role')
+                role_path = f'agents/{requested_role}.toml'
+                if role_path not in receipt.get('owned_files', {}):
+                    raise ValueError('requested role is not installed; run install to upgrade')
+                if requested_role == install.TERRA_ROLE:
+                    project = (Path(os.path.abspath(args.project)) if args.project else
+                               Path(tempfile.mkdtemp(prefix='codex-adaptive-agents-verify-')).resolve() / 'project')
+                    selection = policy.select_task_kind(home, project, 'computer', codex=codex)
+                    if selection.get('role') != requested_role:
+                        show(selection)
+                        return 1
+                else:
+                    supported = policy.direct_supported_efforts(home, codex)
+                    if role_contract[1] not in supported:
+                        raise ValueError('requested role effort is not supported by the public CLI catalogue')
             readiness = doctor(home, codex)
             if not readiness['status'].startswith('READY'):
                 show(readiness)
@@ -260,11 +316,13 @@ def main(argv=None):
                 project = Path(tempfile.mkdtemp(prefix='codex-adaptive-agents-verify-')).resolve() / 'project'
             output = Path(os.path.abspath(args.output)) if args.output else project.parent / ('verification-' + str(time.time_ns()))
             def select_role():
+                if requested_role is not None:
+                    return requested_role
                 selected = policy.select(home, project, codex=codex)
                 if selected.get('role') not in ('adaptive_luna_' + e for e in install.EFFORTS):
                     return selected
                 return selected['role']
-            result = verify.run(home, codex, project, output, None,
+            result = verify.run(home, codex, project, output, requested_role,
                                 root_model=args.root_model, root_effort=args.root_effort,
                                 select_role=select_role)
             show(result)

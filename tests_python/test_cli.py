@@ -77,6 +77,11 @@ class CLITests(unittest.TestCase):
             (['process-check', '--project', '.', '--run-id', 'a' * 32, '--summary'], '--summary'),
             (['doctor', '--summary'], 'process options'),
             (['refresh', '--root-model', 'gpt-6.1-sol'], 'only valid for select or verify'),
+            (['select', '--task-kind', 'desktop'], 'task-kind must be'),
+            (['select', '--task-kind', ''], 'task-kind must be'),
+            (['doctor', '--task-kind', 'general'], 'task-kind is only valid for select'),
+            (['refresh', '--task-kind', 'browser'], 'task-kind is only valid for select'),
+            (['doctor', '--role', 'adaptive_terra_xhigh'], '--role is only valid for verify'),
             (['select', '--root-effort', 'high'], 'only valid for verify'),
             (['internal-smoke-check', '--project', '.', '--dry-run'], '--dry-run'),
             (['recover', '--backup', 'recorded', '--yes'], '--backup'),
@@ -87,6 +92,7 @@ class CLITests(unittest.TestCase):
         boundaries = [(install, 'validate'), (install, 'build'), (install, 'apply'),
                       (install, 'recover'), (cli, 'resolve_codex'), (cli, 'doctor'),
                       (policy, 'select'), (policy, 'refresh_capabilities'),
+                      (policy, 'select_task_kind'),
                       (verify, 'run'), (verify, 'check'),
                       (process_registry, 'init_run'), (process_registry, 'check_run'),
                       (process_registry, 'cleanup_run'), (tempfile, 'mkdtemp')]
@@ -153,11 +159,12 @@ class CLITests(unittest.TestCase):
             fakepy = base / 'fake_codex.py'
             fakepy.write_text('''import json, sys
 args=sys.argv[1:]
-if args == ['--version']: print('codex-cli 0.147.0')
+if args == ['--version']: print('codex-cli 0.159.0')
 elif args == ['debug','models']:
  print(json.dumps({'models': [
   {'slug':'gpt-6-astra','supported_reasoning_levels':[{'effort':'max'}]},
-  {'slug':'gpt-6-luna','supported_reasoning_levels':[{'effort':e} for e in ('low','medium','high','xhigh','max')]}
+  {'slug':'gpt-6-luna','supported_reasoning_levels':[{'effort':e} for e in ('low','medium','high','xhigh','max')]},
+  {'slug':'gpt-6.1-terra','supported_reasoning_levels':[{'effort':e} for e in ('low','medium','high','xhigh')]}
  ]}))
 else: sys.exit(2)
 ''', encoding='utf-8')
@@ -185,7 +192,7 @@ runpy.run_path(entry,run_name='__main__')
             env['PATH'] = os.environ.get('SystemRoot', 'C:\\Windows') + '\\System32' if os.name == 'nt' else '/usr/bin:/bin'
             probe = run([str(launcher), '--version'], env=env, timeout=10)
             self.assertEqual(probe.returncode, 0, probe.stderr.decode('utf-8', errors='replace'))
-            self.assertEqual(probe.stdout.strip(), b'codex-cli 0.147.0')
+            self.assertEqual(probe.stdout.strip(), b'codex-cli 0.159.0')
             def invoke(entry, *args, expect=0):
                 result = run([sys.executable, '-B', str(runner), str(entry), '--codex-home', str(home),
                               '--codex', str(launcher), *args], env=env, timeout=30)
@@ -239,6 +246,23 @@ runpy.run_path(entry,run_name='__main__')
             selected = invoke(entry, 'select', '--project', str(project), '--explain')
             self.assertEqual(selected['role'], 'adaptive_luna_xhigh')
             self.assertFalse(invoke(entry, 'select', '--project', str(project), '--explain')['refreshed'])
+            for task_kind in ('computer', 'browser'):
+                routed = invoke(entry, 'select', '--project', str(project),
+                                '--task-kind', task_kind, '--explain')
+                self.assertEqual((routed['role'], routed['model'], routed['effort']),
+                                 ('adaptive_terra_xhigh', 'gpt-6.1-terra', 'xhigh'))
+                self.assertEqual(routed['task_kind'], task_kind)
+            terra_sidecar = home / policy.RESOURCE / 'terra-capabilities.json'
+            saved_terra_sidecar = terra_sidecar.read_bytes()
+            terra_sidecar.unlink()
+            blocked = invoke(entry, 'select', '--project', str(project),
+                             '--task-kind', 'browser', '--explain', expect=1)
+            self.assertEqual(blocked['status'], 'blocked')
+            self.assertEqual(blocked['role'], '')
+            self.assertIn('Terra capability snapshot unavailable', blocked['reasons'][0])
+            self.assertEqual(invoke(entry, 'select', '--project', str(project), '--explain')['role'],
+                             'adaptive_luna_xhigh')
+            terra_sidecar.write_bytes(saved_terra_sidecar)
             self.assertEqual(invoke(entry, 'refresh')['role'], 'adaptive_luna_xhigh')
             self.assertEqual(invoke(entry, 'install', '--yes')['status'], 'IDEMPOTENT_PASS')
             self.assertEqual(invoke(entry, 'uninstall', '--yes')['status'], 'UNINSTALLED')
